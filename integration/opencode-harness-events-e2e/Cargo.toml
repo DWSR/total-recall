@@ -7,7 +7,7 @@ publish = false
 
 [dependencies]
 chrono.workspace = true
-libc = "=0.2.189"
+libc = "=0.2.190"
 futures-util.workspace = true
 iii-sdk.workspace = true
 reqwest.workspace = true
