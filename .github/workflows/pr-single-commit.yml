@@ -1,0 +1,34 @@
+name: PR single commit
+
+on:
+  pull_request:
+    types:
+      - opened
+      - synchronize
+      - reopened
+      - ready_for_review
+
+permissions:
+  contents: read
+
+concurrency:
+  group: ${{ github.workflow }}-${{ github.event.pull_request.number }}
+  cancel-in-progress: true
+
+jobs:
+  single-commit:
+    name: Enforce a single commit
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+
+    steps:
+      - name: Check pull request commit count
+        env:
+          COMMIT_COUNT: ${{ github.event.pull_request.commits }}
+        run: |
+          set -euo pipefail
+          if [ "$COMMIT_COUNT" -ne 1 ]; then
+            printf '::error::Pull requests must contain exactly one commit, but this one has %s.\n' "$COMMIT_COUNT"
+            exit 1
+          fi
+          printf 'Pull request contains exactly one commit.\n'
