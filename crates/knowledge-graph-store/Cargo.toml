@@ -1,0 +1,19 @@
+[package]
+name = "knowledge-graph-store"
+version = "0.1.0"
+edition.workspace = true
+rust-version.workspace = true
+publish = false
+
+[dependencies]
+async-trait.workspace = true
+icu_casemap.workspace = true
+icu_normalizer.workspace = true
+iii-sdk.workspace = true
+serde.workspace = true
+serde_json.workspace = true
+thiserror.workspace = true
+uuid.workspace = true
+
+[dev-dependencies]
+tokio.workspace = true

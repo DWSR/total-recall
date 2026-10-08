@@ -1,0 +1,52 @@
+{
+  "name": "@dwsr/pi-harness-events",
+  "version": "0.1.0",
+  "description": "Pi extension for harness events",
+  "license": "MIT",
+  "type": "module",
+  "packageManager": "npm@12.2.0",
+  "engines": {
+    "node": "^24.0.0"
+  },
+  "devEngines": {
+    "packageManager": {
+      "name": "npm",
+      "version": "^12.0.0"
+    }
+  },
+  "pi": {
+    "extensions": [
+      "./src/index.ts"
+    ]
+  },
+  "files": [
+    "src",
+    "README.md",
+    "LICENSE"
+  ],
+  "scripts": {
+    "typecheck": "tsc --noEmit",
+    "lint": "biome lint . --error-on-warnings",
+    "format": "biome format --write . && prettier --write README.md",
+    "format:check": "biome format . && prettier --check README.md",
+    "test": "node --test test/*.test.ts",
+    "pack:check": "node scripts/pack-check.ts",
+    "check": "npm run typecheck && npm run lint && npm run format:check && npm run test && npm run pack:check"
+  },
+  "peerDependencies": {
+    "@earendil-works/pi-coding-agent": "*"
+  },
+  "overrides": {
+    "@earendil-works/pi-coding-agent": {
+      "brace-expansion": "5.0.12"
+    }
+  },
+  "dependencies": {},
+  "devDependencies": {
+    "@biomejs/biome": "2.5.14",
+    "@earendil-works/pi-coding-agent": "0.86.1",
+    "@types/node": "24.13.6",
+    "prettier": "3.9.9",
+    "typescript": "7.0.2"
+  }
+}

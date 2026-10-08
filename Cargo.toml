@@ -1,0 +1,57 @@
+[workspace]
+members = [
+  "crates/knowledge-graph-store",
+  "crates/memory-store",
+  "clients/harness-events-cli",
+  "integration/harness-engine-fake",
+  "integration/harness-persistence-engine-fake",
+  "integration/mcp-worker-fake",
+  "integration/knowledge-graph-database-engine-fake",
+  "integration/knowledge-graph-postgres-smoke",
+  "integration/memory-database-engine-fake",
+  "integration/memory-embedding-engine-fake",
+  "integration/memory-postgres-smoke",
+  "integration/session-post-processing-engine-fake",
+  "integration/session-post-processing-postgres-smoke",
+  "integration/pi-harness-events-e2e",
+  "integration/opencode-harness-events-e2e",
+  "workers/harness-event-persistence",
+  "workers/harness-ingestion",
+  "workers/memory-embedding",
+  "workers/mcp-worker",
+  "workers/session-post-processing",
+]
+resolver = "2"
+
+[workspace.package]
+edition = "2024"
+rust-version = "1.98.1"
+
+[workspace.dependencies]
+async-trait = "=0.1.92"
+chrono = { version = "=0.4.45", features = ["serde"] }
+clap = { version = "=4.6.7", features = ["derive"] }
+cron = "=0.17.0"
+futures-util = "=0.3.34"
+icu_casemap = "=2.3.0"
+icu_normalizer = "=2.3.0"
+iii-sdk = "=0.24.3"
+pbjson = "=0.9.0"
+pbjson-types = "=0.9.0"
+prost = "=0.14.4"
+rust-mcp-schema = { version = "=2.0.0", default-features = false, features = ["2026_07_28", "schema_utils"] }
+reqwest = { version = "=0.12.28", default-features = false, features = ["rustls-tls", "stream"] }
+rkyv = "=0.8.18"
+# Pinned to 0.8: iii-sdk pins schemars 0.8 as well; its RegisterFunction
+# bounds need the 0.8 JsonSchema trait, which schemars 1.x does not implement.
+schemars = { version = "=0.8.22", features = ["derive"] }
+serde = { version = "=1.0.229", features = ["derive"] }
+serde_json = "=1.0.151"
+sha2 = "=0.10.9"
+serde_yaml = "=0.9.34"
+thiserror = "=2.0.21"
+tokio = { version = "=1.53.1", features = ["io-std", "io-util", "macros", "rt-multi-thread", "signal", "sync", "time"] }
+tokio-tungstenite = "=0.30.0"
+uuid = { version = "=1.26.1", features = ["v4", "v5", "v7"] }
+pbjson-build = "=0.9.0"
+prost-build = "=0.14.1"

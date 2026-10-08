@@ -1,0 +1,13 @@
+[package]
+name = "pi-harness-events-e2e"
+version = "0.1.0"
+edition.workspace = true
+rust-version.workspace = true
+publish = false
+
+[dependencies]
+iii-sdk.workspace = true
+libc = "=0.2.189"
+serde_json.workspace = true
+thiserror.workspace = true
+tokio = { workspace = true, features = ["io-util", "net", "process", "sync", "time"] }

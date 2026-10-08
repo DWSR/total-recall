@@ -1,0 +1,21 @@
+version: 2
+updates:
+  - package-ecosystem: cargo
+    directory: /
+    schedule:
+      interval: weekly
+    ignore:
+      # iii-sdk requires schemars 0.8; the 1.x JsonSchema trait is a
+      # different, incompatible trait. Only 0.8.x patch bumps are safe.
+      - dependency-name: schemars
+        update-types:
+          - version-update:semver-major
+          - version-update:semver-minor
+  - package-ecosystem: npm
+    directory: /integrations/pi-harness-events
+    schedule:
+      interval: weekly
+  - package-ecosystem: bun
+    directory: /integrations/opencode-harness-events
+    schedule:
+      interval: weekly

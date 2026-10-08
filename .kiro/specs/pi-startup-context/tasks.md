@@ -1,0 +1,207 @@
+# Implementation Plan
+
+- [ ] 1. Establish the pinned host and Pi context foundation
+- [ ] 1.1 Pin the supported Pi host contract
+  - Constrain the host peer to Pi `0.86.1`, retain Node 24, update the lock, and preserve the package's empty production dependency set.
+  - Add manifest checks that reject an unverified host range without changing the existing extension entrypoint.
+  - Completion is observable when a clean install resolves the exact development host and package checks reject peer or Node drift.
+  - _Requirements: 8.1, 8.2, 8.3_
+  - _Boundary: Package Contract_
+- [ ] 1.2 Define strict startup-context contracts
+  - Define the narrow four-field memory record, frozen outcomes, transport failures, diagnostic categories, and whole-result decode outcome.
+  - Reject unknown, accessor-backed, sparse, malformed, or over-limit records before they reach formatting or host hooks.
+  - Completion is observable when exact valid records decode and every protected or malformed shape fails as one complete result with no partial data.
+  - _Requirements: 1.7, 5.1, 5.2, 5.9, 6.9, 6.10_
+  - _Boundary: Context Contracts_
+- [ ] 1.3 Add opt-in context configuration
+  - Resolve disabled, invalid, and enabled modes with the designed defaults, numeric ceilings, cross-deadline rules, absolute worker path, and required memory database.
+  - Produce the exact child-environment allowlist and fixed bounded configuration diagnostic without changing capture configuration.
+  - Completion is observable when pure tests cover every mode and bound and ambient provider, proxy, home, path, capture, and credential sentinels are absent from the child environment.
+  - _Requirements: 1.1, 1.2, 1.3, 1.6, 6.3, 6.8, 6.9, 6.10_
+  - _Boundary: Context Config_
+- [ ] 1.4 (P) Add deterministic section formatting
+  - Render the fixed untrusted-reference instruction and compact four-field JSON in the approved record and key order.
+  - Escape structural delimiters, controls, lone surrogates, U+2028, and U+2029, and measure the complete Pi-rendered wrapper.
+  - Completion is observable when golden tests prove exact repeat bytes, ordinary Unicode preservation, empty behavior, one-byte overflow to empty, and no partial record output.
+  - _Depends: 1.2_
+  - _Requirements: 3.1, 3.2, 5.1, 5.2, 5.3, 5.4, 5.5, 5.6, 5.7, 5.8, 5.9_
+  - _Boundary: Section Formatter_
+
+- [ ] 2. Build the one-shot retrieval transport
+- [ ] 2.1 Implement bounded newline framing and writes
+  - Admit one pending request, serialize LF-terminated writes with backpressure, and bound raw response bytes before decoding.
+  - Reject CR, invalid UTF-8, blank, malformed, oversized, partial, duplicate, trailing, and unexpected-ID frames.
+  - Completion is observable when controlled streams deterministically cover fragmented and coalesced input, backpressure, every framing failure, and terminal stream cleanup.
+  - _Requirements: 1.7, 5.9, 6.1, 6.3, 6.10_
+  - _Boundary: MCP Transport_
+- [ ] 2.2 Implement the exact discovery and context exchange
+  - Send metadata-bearing discovery, registry, and context requests with child-scoped monotonic IDs and the configured explicit limit.
+  - Validate server identity, protocol version, complete results, the exact context tool schema, fixed success content, and strict decoded records while allowing unrelated registered tools.
+  - Completion is observable when transport tests accept only the approved exchange, send no query or session data, and map protocol or tool failures to fixed categories.
+  - _Requirements: 1.4, 1.5, 1.7, 1.8, 5.1, 5.2, 5.9, 6.1, 6.10_
+  - _Boundary: MCP Transport_
+- [ ] 2.3 Add direct child startup and normal completion
+  - Spawn the absolute worker without a shell using the sanitized environment, executable-parent working directory, and piped streams.
+  - Drain and discard stderr, complete the strict exchange, close stdin, and require exit zero plus fully drained streams before returning context.
+  - Completion is observable when spawn, normal response, early exit, partial EOF, extra stdout, and stderr-sentinel tests retain no dependency output and leave no live child.
+  - _Requirements: 1.2, 1.6, 6.1, 6.4, 6.5, 6.8, 6.10, 6.12_
+  - _Boundary: MCP Transport_
+- [ ] 2.4 Enforce caller-owned lookup and retained cleanup deadlines
+  - Honor the caller-supplied session lookup deadline and create only nested startup and cleanup deadlines without reset by protocol steps or host waits.
+  - On failure or expiry resolve the lookup, retain one cleanup promise, and perform TERM-to-KILL escalation under a deadline that later closes may shorten but never extend.
+  - Completion is observable when startup, lookup, timeout races, late exit, repeated close, and cleanup-deadline tests settle every waiter, report fixed categories, leave no live child, and never retry.
+  - _Requirements: 2.6, 2.11, 6.1, 6.2, 6.3, 6.4, 6.5, 6.6, 6.7, 6.10_
+  - _Boundary: MCP Transport_
+
+- [ ] 3. Freeze session snapshots and connect Pi lifecycle
+- [ ] 3.1 Implement shared frozen snapshot resolution
+  - Begin one internally contained lookup synchronously at valid session start, create its absolute lookup deadline, and pass the same deadline and promise to every resolver.
+  - Format once and freeze exact text or empty for success, empty, failure, timeout, malformed data, or overflow without eviction or refresh.
+  - Completion is observable when concurrent resolution performs one lookup and repeated calls remain byte-identical despite changed backend outcomes.
+  - _Depends: 1.4, 2.4_
+  - _Requirements: 2.1, 2.2, 2.3, 2.4, 2.5, 2.6, 2.7, 2.8, 2.11, 3.2, 3.3_
+  - _Boundary: Snapshot Runtime_
+- [ ] 3.2 Enforce identity and teardown isolation
+  - Validate Pi's bounded session grammar; invalid or mismatched resolution returns empty without mutating active state, and repeated same-identity starts are idempotent.
+  - A conflicting start invalidates the active token and freezes empty without a second child; shutdown invalidates before joining any earlier cleanup deadline.
+  - Completion is observable when tests cover invalid and mismatched resolution, conflict, shutdown during lookup, late success, duplicate shutdown, fresh-runtime textual ID reuse, and no retained state.
+  - _Requirements: 2.9, 2.10, 2.12, 2.13, 4.8, 4.9, 6.6, 6.7_
+  - _Boundary: Snapshot Runtime_
+- [ ] 3.3 Add bounded context diagnostics
+  - Emit only fixed ASCII category records, at most once per category and loaded runtime, with the complete line inside the configured byte bound.
+  - Contain reporter failures and exclude child output, protocol data, context values, paths, identities, environment values, and stacks.
+  - Completion is observable when repeated failures emit one bounded category and protected sentinels never appear in captured diagnostics.
+  - _Requirements: 6.1, 6.9, 6.10_
+  - _Boundary: Context Coordinator_
+- [ ] 3.4 Add cache-stable Pi section hooks
+  - Start context from `session_start` without awaiting and, on every primary start, delete the reserved section before awaiting and restore it only for frozen text.
+  - Preserve all other prompt sections and tools; return no custom message or complete prompt and register no conversation-context or provider hook.
+  - Completion is observable when host-hook tests prove one reserved section, byte-identical repeats, stale deletion in disabled, invalid, and empty modes, continuation reuse, and contained diagnostics.
+  - _Requirements: 1.1, 1.2, 1.3, 3.1, 3.2, 3.3, 3.4, 3.5, 3.6, 3.7, 3.8, 3.9, 4.3, 4.4, 4.5, 4.6, 5.3, 6.1, 7.1, 7.2_
+  - _Boundary: Context Coordinator_
+- [ ] 3.5 Compose capture and context independently
+  - Build context beside the existing capture runtime, retain all subscriptions, and release both planes through one idempotent shutdown path with independent settlement.
+  - Preserve existing lifecycle, observation, queue, dispatch, agent-directed memory, and failure behavior when context is disabled, invalid, enabled, or failing.
+  - Completion is observable when composition tests prove either plane can fail or time out without suppressing the other's start, work, or cleanup.
+  - _Requirements: 1.3, 1.6, 1.8, 4.1, 4.2, 4.7, 6.11, 7.5, 7.6, 7.7_
+  - _Boundary: Package Entrypoint, Context Coordinator, Existing Capture_
+
+- [ ] 4. Complete package and pinned-host compatibility
+- [ ] 4.1 Complete the source-package artifact contract
+  - Include every new production source module while excluding tests, fixtures, generated artifacts, and retrieval binaries.
+  - Extend tarball and isolated-consumer checks while retaining the source entrypoint and empty production dependency set.
+  - Completion is observable when the packed archive matches the exact allowlist, installs offline, loads through Jiti, and contains no bundled worker.
+  - _Requirements: 6.12, 8.1, 8.2, 8.3, 8.4_
+  - _Boundary: Package Contract_
+- [ ] 4.2 Verify native named-section replay
+  - Load the packed extension through Pi's manifest and public in-memory session APIs with persisted system-section state.
+  - Prove equal section bodies emit no patch, changed bodies emit one replacement, and empty or disabled state emits only the reserved null patch.
+  - Completion is observable when pinned-host tests pass first injection, identical replay, replacement, removal, and untouched unrelated-section cases without external services.
+  - _Requirements: 3.3, 3.4, 3.5, 4.3, 4.4, 4.5, 4.6, 4.7, 8.3, 8.4_
+  - _Boundary: Package Contract, Context Coordinator_
+- [ ] 4.3 Verify feedback and auxiliary-call isolation
+  - Exercise persisted system state through capture, compaction conversation serialization, and abandoned-branch serialization using pinned Pi APIs.
+  - Prove startup values are not classified as user, assistant, tool, compaction, or branch-summary evidence and existing capture selections remain exact.
+  - Completion is observable when protected startup sentinels are absent from every captured or summarized conversation artifact while native system patches remain inspectable.
+  - _Requirements: 7.1, 7.2, 7.3, 7.4, 7.5_
+  - _Boundary: Package Contract, Existing Capture_
+
+- [ ] 5. Prepare real-host context verification
+- [ ] 5.1 Gate the live harness on the upstream context worker
+  - Extend explicit artifact validation with the real release worker and reject missing, wrong, or pre-context five-tool artifacts.
+  - Verify the approved server identity, protocol, and exact context schema without implementing upstream migrations, reads, or tool behavior in this spec.
+  - Completion is observable when only a release worker containing the approved sixth tool can enter Pi context scenarios.
+  - _Requirements: 1.4, 1.7, 1.8, 8.4, 8.11_
+  - _Boundary: Verification Harness_
+- [ ] 5.2 Add deterministic context data to the engine harness
+  - Register database execution beside the existing three capture functions and script ordered success, empty, changed, backend-failure, malformed, and delayed results.
+  - Record request shape and lookup count without retaining memory values in errors or diagnostics; leave artifact and scenario wiring untouched.
+  - Completion is observable when focused engine tests serve exact scripted database responses while all existing capture functions remain routable and unchanged.
+  - _Requirements: 1.7, 2.4, 2.5, 2.6, 2.7, 8.5, 8.6, 8.7_
+  - _Boundary: Engine Harness_
+- [ ] 5.3 (P) Add direct retrieval-child observation
+  - Build an isolated worker wrapper that emits bounded PID and exit reports for normal result, protocol failure, timeout, and shutdown; leave shared artifact wiring for integration.
+  - Keep reports identity-only and distinguish direct child exit from fallback process-group cleanup.
+  - Completion is observable when wrapper tests prove each child outcome and no report contains protocol, path, or context payloads.
+  - _Depends: 5.1_
+  - _Requirements: 6.4, 6.5, 6.6, 6.10, 8.8_
+  - _Boundary: Context Process Observer_
+- [ ] 5.4 (P) Add the provider-visible context recorder
+  - Record effective system bytes and request class while scripting tool use, transient retry, summary responses, and final responses without network I/O.
+  - Keep output in bounded test reports and leave Pi process orchestration and artifact wiring untouched.
+  - Completion is observable when fixture tests produce deterministic primary, continuation, retry, and summary reports with no external credential, process, or network access.
+  - _Depends: 4.2_
+  - _Requirements: 3.3, 3.4, 3.5, 7.3, 7.4, 8.5, 8.6, 8.10_
+  - _Boundary: Provider Fixture_
+- [ ] 5.5 Add the persisted Pi RPC scenario driver
+  - Drive multiple prompts, queued follow-up, new session, fork, switch, compaction, and a test-only reload command under absolute process and RPC deadlines.
+  - Retain isolated session roots long enough for bounded JSONL and provider-report inspection, then clean them deterministically.
+  - Completion is observable when driver tests correlate every command and event, expose exact session files and identities, and reap Pi on success, error, timeout, or malformed RPC output.
+  - _Requirements: 4.1, 4.2, 8.5, 8.6, 8.7, 8.8_
+  - _Boundary: Pi Scenario Driver_
+- [ ] 5.6 Wire explicit context scenario artifacts
+  - Connect the worker, engine scripts, PID observer, provider recorder, lifecycle driver, packed extension, capture CLI, and Pi executable through one validated scenario contract.
+  - Keep all artifact paths and report locations explicit and reject missing, wrong, or unstaged inputs before process startup.
+  - Completion is observable when one smoke scenario crosses every real boundary and all focused fixtures remain independently testable.
+  - _Depends: 5.2, 5.3, 5.4, 5.5_
+  - _Requirements: 6.4, 6.5, 6.6, 8.4, 8.5, 8.8_
+  - _Boundary: Verification Harness Integration_
+
+- [ ] 6. Exercise real Pi lifecycle and repository gates
+- [ ] 6.1 Prove stable context in a persisted RPC session
+  - Run two primary prompts plus tool continuation, queued follow-up, and transient retry against changing backend data through real Pi, iii, and the worker.
+  - Assert one lookup, one active section, no additional section patch, byte-identical provider-visible startup state, and unchanged capture.
+  - Completion is observable when the scenario exits cleanly with exact lookup, provider, capture, JSONL, and child-exit reports.
+  - _Depends: 5.6_
+  - _Requirements: 2.1, 2.2, 2.3, 2.4, 2.7, 2.8, 3.1, 3.2, 3.3, 3.4, 3.5, 7.1, 7.2, 7.5, 8.5, 8.6, 8.7, 8.8_
+  - _Boundary: Verification Harness_
+- [ ] 6.2 Prove in-process session transitions
+  - Exercise reload, new session, fork, and switch flows with equal and changed context in one real Pi RPC process.
+  - Assert old-runtime shutdown precedes each new lookup, equal bytes emit no patch, changed bytes emit one replacement, and no session shares frozen state.
+  - Completion is observable when every transition has exact session identity, lookup count, provider bytes, JSONL patch, and direct child-exit evidence.
+  - _Requirements: 2.9, 2.12, 2.13, 4.1, 4.2, 4.3, 4.4, 4.7, 4.8, 6.6, 8.6, 8.7, 8.8_
+  - _Boundary: Verification Harness_
+- [ ] 6.3 Prove process resume and stale-section removal
+  - Resume persisted sessions in fresh processes with equal, changed, empty, disabled, and invalid context modes.
+  - Assert one runtime-local lookup when enabled, no extension-owned restoration, one null removal when absent, unchanged historical entries, and no lookup when disabled or invalid.
+  - Completion is observable when provider and JSONL reports prove current replay state and append-only history for every mode.
+  - _Requirements: 2.9, 2.10, 2.11, 4.1, 4.3, 4.4, 4.5, 4.6, 4.7, 4.8, 4.9, 6.6, 8.6, 8.7, 8.8_
+  - _Boundary: Verification Harness_
+- [ ] 6.4 Prove compaction and auxiliary-call isolation
+  - Drive threshold and overflow compaction inside an active run and exercise abandoned-branch serialization through pinned Pi.
+  - Assert summary requests contain no startup-memory values, automatic continuation performs no lookup or startup patch, and primary provider bytes remain unchanged.
+  - Completion is observable when compaction and branch reports prove exclusion while the active named section survives through Pi's native checkpoint.
+  - _Requirements: 3.3, 3.4, 7.3, 7.4, 8.6, 8.7_
+  - _Boundary: Verification Harness_
+- [ ] 6.5 Prove fail-open configuration and protocol behavior
+  - Exercise invalid configuration and identity, spawn failure, schema drift, tool and backend failure, malformed framing, and oversized results.
+  - Assert invalid identity returns empty without mutating active state; terminal failures for a valid active runtime freeze empty while primary Pi work and capture complete.
+  - Completion is observable when every case emits at most one bounded category and exits without retries, partial context, changed capture semantics, or protected diagnostic output.
+  - _Requirements: 1.6, 1.7, 2.5, 2.6, 2.10, 2.11, 5.7, 5.9, 6.1, 6.3, 6.7, 6.8, 6.9, 6.10, 6.11, 8.6_
+  - _Boundary: Verification Harness_
+- [ ] 6.6 Prove timeout and shutdown cleanup
+  - Exercise startup and lookup expiry, session conflict, shutdown during lookup, late response, TERM escalation, and KILL escalation.
+  - Assert host waiters release at lookup deadline, cleanup uses its earlier retained deadline, every late result is discarded, and no process or pending lookup remains.
+  - Completion is observable when each race has deterministic timing and direct-child evidence before fallback teardown.
+  - _Requirements: 2.6, 2.12, 2.13, 6.2, 6.3, 6.4, 6.5, 6.6, 6.7, 8.8_
+  - _Boundary: Verification Harness_
+- [ ] 6.7 Add the loopback-only context check
+  - Package Pi, iii, the worker, capture CLI, provider, driver, and scenarios into an x86-64 Linux Nix check with loopback-only networking.
+  - Fail closed when isolation is unavailable and require a deliberate public-egress probe to fail while loopback paths succeed.
+  - Completion is observable when the full context matrix passes without registry access, external model credentials, or public network access.
+  - _Requirements: 8.4, 8.9, 8.10_
+  - _Boundary: Verification Harness, Nix Sandbox_
+- [ ] 6.8 Integrate supported-system outputs and continuous verification
+  - Expose package, npm-check, Rust compile, and artifact-contract derivations on all four declared systems and the full live matrix on x86-64 Linux.
+  - Add CI execution and workflow-shape assertions without removing or weakening existing Rust, Pi capture, dependency-policy, or flake gates.
+  - Completion is observable when every declared output evaluates and the CI contract rejects a missing context or pre-existing gate.
+  - _Requirements: 7.5, 7.6, 8.9, 8.10, 8.11_
+  - _Boundary: Repository Gates, Verification Harness_
+
+- [ ] 7. Run the complete acceptance gate
+  - Run the package aggregate check; packed-host tests; locked workspace tests; formatting; warning-free Clippy; dependency policy; release worker contract; real Pi RPC context matrix; no-egress check; and `nix flake check`.
+  - Route failures to their owning prior boundary without redesigning or implementing upstream context behavior in this task.
+  - Completion is observable only when every named gate exits successfully, all requirements retain evidence, diagnostics expose no protected values, and no owned process remains.
+  - _Depends: 6.8_
+  - _Requirements: 1.1, 1.2, 1.3, 1.4, 1.5, 1.6, 1.7, 1.8, 2.1, 2.2, 2.3, 2.4, 2.5, 2.6, 2.7, 2.8, 2.9, 2.10, 2.11, 2.12, 2.13, 3.1, 3.2, 3.3, 3.4, 3.5, 3.6, 3.7, 3.8, 3.9, 4.1, 4.2, 4.3, 4.4, 4.5, 4.6, 4.7, 4.8, 4.9, 5.1, 5.2, 5.3, 5.4, 5.5, 5.6, 5.7, 5.8, 5.9, 6.1, 6.2, 6.3, 6.4, 6.5, 6.6, 6.7, 6.8, 6.9, 6.10, 6.11, 6.12, 7.1, 7.2, 7.3, 7.4, 7.5, 7.6, 7.7, 8.1, 8.2, 8.3, 8.4, 8.5, 8.6, 8.7, 8.8, 8.9, 8.10, 8.11_
+  - _Boundary: Final Validation_

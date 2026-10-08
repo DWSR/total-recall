@@ -1,0 +1,3 @@
+name: memory-embedding
+scripts:
+  start: ../../target/release/memory-embedding

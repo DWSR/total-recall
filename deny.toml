@@ -1,0 +1,14 @@
+[advisories]
+version = 2
+
+[licenses]
+version = 2
+private = { ignore = true }
+allow = [
+  "Apache-2.0",
+  "BSD-3-Clause",
+  "CDLA-Permissive-2.0",
+  "ISC",
+  "MIT",
+  "Unicode-3.0",
+]

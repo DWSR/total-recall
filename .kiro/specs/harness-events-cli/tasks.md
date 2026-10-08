@@ -1,0 +1,130 @@
+# Implementation Plan
+
+- [ ] 1. Establish the client package and test foundation
+- [x] 1.1 Create the workspace package and contract-generation baseline
+  - Register the client package and `harness-events` binary with exact production, build, and development dependency pins.
+  - Generate request and ProtoJSON types from the authoritative root harness protobuf with the established well-known-type and field-name settings.
+  - Keep the ingestion worker development-only as a contract oracle and exclude worker crates from the production dependency graph.
+  - The locked workspace resolves and the generated request types compile for the new package.
+  - _Requirements: 6.1, 6.5_
+  - _Boundary: Build Contract_
+- [x] 1.2 Create the minimal in-process iii protocol fake
+  - Support registration acknowledgement and rejection.
+  - Capture one function invocation and return configurable success, remote rejection, malformed response, or dropped-connection outcomes.
+  - Expose captured identity, namespace, function identifier, payload, and invocation count to callers.
+  - Keep request-timeout verification in the SDK Session through injected local bounds because iii-sdk 0.24.0 does not serialize timeout_ms on the invocation wire.
+  - Fake-level tests make every configured protocol outcome deterministic without a live engine.
+  - _Requirements: 6.3, 6.5_
+  - _Boundary: Protocol Fake_
+
+- [ ] 2. Implement isolated client components
+- [x] 2.1 (P) Resolve engine and namespace configuration
+  - Read non-blank `III_URL` and otherwise select the SDK default engine URL.
+  - Read non-blank `III_NAMESPACE`, leave default routing unset when absent or blank, and ignore `III_WORKER_NAME`.
+  - Cover explicit, absent, and blank environment values through a deterministic configuration seam.
+  - Configuration tests expose the exact URL and namespace selected for every case.
+  - _Requirements: 4.1, 4.2, 4.3, 4.4_
+  - _Boundary: Client Config_
+  - _Depends: 1.1_
+- [x] 2.2 (P) Define the typed command surface
+  - Provide `session-start`, `observation`, and `session-end` with the required kebab-case long options from the design.
+  - Reject missing values, unknown commands, and unknown options before application work begins; render generated help without dispatch.
+  - Preserve Clap's status `2` for usage failures and status `0` for help.
+  - Parser tests make every accepted command and rejected grammar case observable without creating a client.
+  - _Requirements: 1.1, 1.2, 1.3, 1.4, 1.5, 1.6_
+  - _Boundary: CLI Parser_
+  - _Depends: 1.1_
+- [x] 2.3 Build lifecycle submissions
+  - Consume the typed lifecycle commands through a closed set of authoritative ingestion function identifiers.
+  - Construct generated lifecycle requests and preserve every supplied field in ProtoJSON.
+  - Keep request preparation free of engine and process side effects.
+  - Unit tests expose the exact function identifier and request object for start and end commands.
+  - _Requirements: 2.1, 2.2, 2.3, 6.1, 6.2_
+  - _Boundary: Submission Builder_
+- [x] 2.4 Add strict observation submission preparation
+  - Read exactly one JSON value and reject empty, malformed, non-object, or trailing input.
+  - Recursively convert values to protobuf Struct semantics, including large-integer rounding and unrepresentable-number rejection.
+  - Preserve arbitrary keys and nested values without interpreting harness-specific content.
+  - Unit tests expose the exact observation function and payload and prove every invalid input completes before client creation.
+  - _Requirements: 3.1, 3.2, 3.3, 3.4, 3.5, 6.4_
+  - _Boundary: Submission Builder_
+- [x] 2.5 Enforce the one-submission result contract
+  - Consume one prepared submission through a single-use invocation boundary with typed connection and invocation failures.
+  - Accept only the exact dispatched response and classify remote errors, timeouts, and other values as failures.
+  - Do not initiate an application retry or imply persistence, ordering, or deduplication.
+  - Recording and failing tests prove one invocation at most and expose each result category.
+  - _Requirements: 2.4, 3.6, 5.1, 5.5, 5.6_
+  - _Boundary: Application Runner_
+- [x] 2.6 Manage a transient SDK session
+  - Register a unique explicit client identity, apply the configured namespace, and use 30-second production readiness and trigger bounds.
+  - Map SDK outcomes into the established connection and invocation failures and permit shorter injected bounds in adapter tests.
+  - Run joining shutdown after every registration or invocation outcome while leaving SDK-managed reconnect replay behavior unchanged.
+  - Adapter tests expose identity, namespace, locally injected timeout bounds, one-trigger, and shutdown behavior without a live engine.
+  - _Requirements: 4.3, 4.4, 4.5, 5.5_
+  - _Boundary: SDK Session_
+  - _Depends: 1.2, 2.1, 2.5_
+
+- [ ] 3. Integrate the process boundary
+- [x] 3.1 Connect successful command execution through shutdown
+  - Complete local parsing and observation preparation before creating an SDK session, and do not read stdin for lifecycle commands.
+  - Connect configuration, one-submission orchestration, SDK invocation, exact-response validation, and joining shutdown.
+  - Keep successful event-command stdout and stderr empty and return `0` only for the exact success response.
+  - Process-independent tests expose successful lifecycle and observation orchestration without a live engine.
+  - _Requirements: 2.1, 2.2, 2.3, 3.1, 3.2, 4.1, 4.3, 5.1, 5.5, 5.6_
+  - _Boundary: Process Integration_
+  - _Depends: 2.2, 2.4, 2.5, 2.6_
+- [x] 3.2 Map process failures and diagnostics
+  - Preserve Clap-managed usage text and status `2`; map local observation failures to `2`, connection or registration failures to `3`, and invocation failures to `4`.
+  - Emit fixed diagnostics for local observation, connection, and invocation failures while leaving help output under Clap's ownership.
+  - Suppress payloads, observation data, SDK source chains, remote text, and remote stacks from event-command output.
+  - Process-independent tests make every status and diagnostic category observable.
+  - _Requirements: 1.4, 1.5, 1.6, 2.4, 3.5, 3.6, 4.5, 5.2, 5.3, 5.4_
+  - _Boundary: Process Adapter_
+
+- [ ] 4. Validate authoritative and process contracts
+- [x] 4.1 Add the ingestion contract oracle
+  - Compare the client's closed function set with the ingestion worker's public function identifiers.
+  - Pass each client ProtoJSON payload through authoritative ingestion inputs and derive expected success JSON from the public dispatch response.
+  - Cover observation number conversion with the large-integer rounding fixture and arbitrary nested values.
+  - Contract tests fail on function, request-adapter, Struct-semantics, or success-response drift.
+  - _Requirements: 2.1, 2.2, 2.3, 3.2, 3.3, 3.4, 6.1, 6.2, 6.4_
+  - _Boundary: Contract Tests_
+- [x] 4.2 Build the nonblocking process-test harness
+  - Launch the child binary while the asynchronous fake continues servicing its socket.
+  - Supply per-scenario environment, arguments, and stdin and capture status, stdout, stderr, and fake observations.
+  - A harness smoke test completes one registration and invocation without deadlock or live services.
+  - _Requirements: 6.3, 6.5_
+  - _Boundary: Process Tests_
+  - _Depends: 1.2, 3.2_
+- [x] 4.3 Verify successful process flows
+  - Execute all three subcommands against the fake with explicit URL and namespace configuration.
+  - Assert the authoritative function identifiers and ProtoJSON payloads, exact success status, empty event-command output, and absence of live services.
+  - Include nested opaque observation data and large-number conversion in the successful observation path.
+  - All three command paths complete through registration, one invocation, and shutdown.
+  - _Requirements: 2.1, 2.2, 2.3, 3.2, 3.3, 3.4, 4.1, 4.2, 4.3, 4.4, 5.1, 6.2, 6.4, 6.5_
+  - _Boundary: Process Tests, Protocol Fake_
+- [x] 4.4 Verify help and local rejection paths
+  - Prove help returns `0` without creating a client and Clap usage errors return `2` without connecting to the fake.
+  - Prove empty, malformed, non-object, and trailing observation input returns `2` before client creation.
+  - Assert lifecycle commands never consume stdin.
+  - Local process tests expose every pre-connection status and output contract.
+  - _Requirements: 1.4, 1.5, 1.6, 3.1, 3.5, 5.2, 5.3, 6.3, 6.5_
+  - _Boundary: Process Tests_
+- [x] 4.5 Verify engine, invocation, and diagnostic privacy failures
+  - Prove connection failure and registration rejection return `3` without a trigger call.
+  - Prove remote rejection, dropped connection, and malformed success return `4` without a CLI retry.
+  - Use opaque sentinel data to assert output never contains observation content, serialized payloads, source chains, remote messages, or stacks.
+  - Failure coverage makes every remote status and fixed diagnostic observable without a live ingestion worker.
+  - _Requirements: 2.4, 3.6, 4.5, 5.2, 5.3, 5.4, 5.5, 6.3, 6.5_
+  - _Boundary: Process Tests, Protocol Fake_
+- [x] 4.6 Add release-build verification to CI
+  - Build the client release binary explicitly alongside existing workspace test, format, and Clippy gates.
+  - Run the complete locked verification suite after the client enters the workspace.
+  - CI visibly verifies the release client and all infrastructure-free contract and process tests.
+  - _Requirements: 6.3, 6.5_
+  - _Boundary: CI Verification_
+
+## Implementation Notes
+
+- iii-sdk 0.24.0 consumes TriggerRequest.timeout_ms before WebSocket serialization; test timeout policy through injected client bounds, not protocol-fake capture.
+- Protocol Fake cancellation drains the kernel accept queue directly because Tokio `poll_accept` can report `Pending` before reactor readiness observes a queued socket.

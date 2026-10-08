@@ -1,0 +1,54 @@
+syntax = "proto3";
+
+package total_recall.harness.v1;
+
+import "google/protobuf/struct.proto";
+
+message SessionStartRequest {
+  string session_id = 1 [json_name = "session_id"];
+  string project_name = 2 [json_name = "project_name"];
+  string timestamp = 3 [json_name = "timestamp"];
+  string current_working_directory = 4 [json_name = "current_working_directory"];
+}
+
+message SessionEndRequest {
+  string session_id = 1 [json_name = "session_id"];
+  string project_name = 2 [json_name = "project_name"];
+  string timestamp = 3 [json_name = "timestamp"];
+  string current_working_directory = 4 [json_name = "current_working_directory"];
+}
+
+message ObservationRequest {
+  string hook_type = 1 [json_name = "hook_type"];
+  string project_name = 2 [json_name = "project_name"];
+  string current_working_directory = 3 [json_name = "current_working_directory"];
+  string timestamp = 4 [json_name = "timestamp"];
+  string session_id = 5 [json_name = "session_id"];
+  google.protobuf.Struct data = 6 [json_name = "data"];
+}
+
+message SessionStartEvent {
+  string event_type = 1 [json_name = "event_type"];
+  string session_id = 2 [json_name = "session_id"];
+  string project_name = 3 [json_name = "project_name"];
+  string timestamp = 4 [json_name = "timestamp"];
+  string current_working_directory = 5 [json_name = "current_working_directory"];
+}
+
+message SessionEndEvent {
+  string event_type = 1 [json_name = "event_type"];
+  string session_id = 2 [json_name = "session_id"];
+  string project_name = 3 [json_name = "project_name"];
+  string timestamp = 4 [json_name = "timestamp"];
+  string current_working_directory = 5 [json_name = "current_working_directory"];
+}
+
+message ObservationEvent {
+  string event_type = 1 [json_name = "event_type"];
+  string hook_type = 2 [json_name = "hook_type"];
+  string project_name = 3 [json_name = "project_name"];
+  string current_working_directory = 4 [json_name = "current_working_directory"];
+  string timestamp = 5 [json_name = "timestamp"];
+  string session_id = 6 [json_name = "session_id"];
+  google.protobuf.Struct data = 7 [json_name = "data"];
+}

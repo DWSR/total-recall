@@ -1,0 +1,15 @@
+[package]
+name = "memory-postgres-smoke"
+version = "0.1.0"
+edition.workspace = true
+rust-version.workspace = true
+publish = false
+
+[dependencies]
+chrono.workspace = true
+iii-sdk.workspace = true
+mcp-worker = { path = "../../workers/mcp-worker" }
+memory-store = { path = "../../crates/memory-store" }
+rust-mcp-schema.workspace = true
+serde_json.workspace = true
+tokio.workspace = true

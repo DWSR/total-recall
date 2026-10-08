@@ -1,0 +1,214 @@
+# Implementation Plan
+
+- [ ] 1. Establish the indexed memory-context domain
+- [ ] 1.1 Add current-head recency state
+  - Add the forward transactional change that records the selected canonical memory's update time on each current head.
+  - Replace the secured head-maintenance behavior, backfill exact selected versions, validate non-null state, and retain existing privileges and old-reader compatibility under finite migration limits.
+  - Completion is observable when a seeded baseline applies atomically and any lock or statement timeout leaves the baseline unchanged.
+  - _Requirements: 1.1, 1.2_
+  - _Boundary: Head Recency Projection_
+- [ ] 1.2 Add the concurrent recency index path
+  - Add the standalone ordered B-tree build with the approved update-time, bytewise identity, and version order.
+  - Support non-transactional application and explicit recovery from an invalid concurrent index without weakening the transactional migration path.
+  - Completion is observable when a failed build can be repaired and the valid index is available without blocking resumed memory writers.
+  - _Requirements: 1.2_
+  - _Boundary: Head Recency Projection_
+- [ ] 1.3 (P) Define the narrow context read boundary
+  - Add validated count and candidate-byte inputs plus narrow type, title, content, and concepts records and the terminal oversized sentinel.
+  - Keep database effects behind a focused read port with recording and failing test doubles and protected-value-safe errors.
+  - Completion is observable when invalid inputs make no database call and every valid or failing candidate outcome is independently testable.
+  - _Requirements: 1.3, 1.4, 1.5, 1.6, 2.1, 2.2, 2.6_
+  - _Boundary: Memory Context Store_
+- [ ] 1.4 Implement the indexed context database adapter
+  - Select the bounded ordered head prefix before joining canonical text and return only complete records or an oversized sentinel.
+  - Use static positional database requests, exact envelope decoding, an SDK-owned timeout, and a terminal await that preserves pending-invocation cleanup.
+  - Completion is observable when exact-order, empty, malformed, oversized, repeated-timeout, and subsequent-progress adapter tests pass without protected diagnostics.
+  - _Depends: 1.1, 1.3_
+  - _Requirements: 1.1, 1.2, 1.4, 1.5, 2.1, 2.2, 2.5, 2.6, 2.7, 3.5, 8.4, 8.9, 8.10, 8.11_
+  - _Boundary: Memory Context Store_
+- [ ] 1.5 Verify migrations and context ordering on PostgreSQL 17 and 18
+  - Apply the baseline, transactional recency change, and standalone concurrent index in their required modes with a simulated writer maintenance window.
+  - Exercise exact backfill, greater-version trigger advancement, historical timestamps, deterministic ties, limits, empty state, oversized candidates, privileges, timeout rollback, and invalid-index recovery.
+  - Require the populated bounded read to use the recency index without asserting an entire planner shape.
+  - Completion is observable when both PostgreSQL majors pass unchanged and existing memory and search behavior remains intact.
+  - _Depends: 1.2, 1.4_
+  - _Requirements: 1.1, 1.2, 1.4, 1.5, 2.5, 2.7, 3.6_
+  - _Boundary: Head Recency Projection, Memory Context Store, PostgreSQL Verification_
+
+- [ ] 2. Expose bounded startup context through MCP
+- [ ] 2.1 Add context configuration and the strict tool contract
+  - Validate default and maximum counts, result bytes, operation and database deadlines, and cross-field relationships before stdout ownership.
+  - Define the query-free optional count input with explicit-null rejection, the narrow result DTO, and the static schema ceiling while preserving all existing tool schemas.
+  - Completion is observable when configuration and contract tests cover defaults, every invalid boundary, no-call rejection, the six-tool registry, and payload-safe startup failures.
+  - _Depends: 1.3_
+  - _Requirements: 1.3, 2.1, 2.2, 2.3, 2.4, 2.8, 3.1, 3.2, 3.3, 3.6, 8.9, 8.11_
+  - _Boundary: MCP Context Service_
+- [ ] 2.2 Implement exact context-result assembly
+  - Adapt the focused domain read into one `memory_context` operation and map invalid, backend, and malformed outcomes to fixed errors.
+  - Build the complete ordered compact-JSON prefix, stop at the first oversized or non-fitting candidate, and return no partial records or retry.
+  - Completion is observable when service tests prove omitted, default, and explicit limits, empty results, first and later overflow, exact fields and bytes, one operation, and content-safe failures.
+  - _Depends: 1.4, 2.1_
+  - _Requirements: 1.3, 1.4, 1.5, 1.6, 2.3, 2.4, 2.5, 2.6, 2.7, 3.4, 3.5, 8.10, 8.11_
+  - _Boundary: MCP Context Service_
+- [ ] 2.3 Integrate the sixth tool and process-level verification
+  - Route the strict context input through production composition while retaining discovery, framing, resource bounds, and every existing tool path.
+  - Extend the database and release-worker protocol fakes for exact SQL, narrow success, invalid input, empty, oversized, timeout, malformed, privacy, and unchanged-tool scenarios.
+  - Update and contract-test the worker launch-settings table and protocol-fake scenario contract for every new context setting and outcome.
+  - Completion is observable when the release worker advertises exactly six tools and passes context plus all prior smoke scenarios without live production services.
+  - _Depends: 2.2_
+  - _Requirements: 3.1, 3.2, 3.3, 3.4, 3.5, 3.6, 8.3, 8.6, 8.7, 8.10, 8.11_
+  - _Boundary: MCP Context Boundary, Protocol Fakes_
+
+- [ ] 3. Build the OpenCode startup-context core
+- [ ] 3.1 (P) Add opt-in context configuration
+  - Parse disabled, invalid, and enabled modes, including absolute binary path, orphan settings, required database target, all positive bounds, and cross-limit consistency.
+  - Produce the exact child-environment allowlist and one fixed diagnostic fallback without inheriting ambient capture, provider, proxy, path, home, or credential values.
+  - Completion is observable when pure tests cover every mode, default, invalid combination, byte cap, and ambient-environment sentinel with capture configuration unchanged.
+  - _Requirements: 4.1, 4.4, 4.6, 4.8, 8.1, 8.2, 8.9, 8.11_
+  - _Boundary: Context Config_
+- [ ] 3.2 (P) Add deterministic context formatting
+  - Render typed context records as the fixed untrusted-reference instruction and compact JSON with fixed key order, complete-record preservation, and exact UTF-8 injection bounds.
+  - Escape quotes, controls, U+2028, and U+2029 while preserving all other Unicode and record and concept order.
+  - Completion is observable when golden tests prove byte identity, structural containment, preserved ordinary Unicode, empty output, overflow-to-empty, and exclusion of provenance fields.
+  - _Requirements: 2.1, 2.2, 6.1, 6.2, 6.3, 6.5, 6.6, 6.7, 6.8, 8.10, 8.11_
+  - _Boundary: Context Formatter_
+- [ ] 3.3 Implement child startup and protocol readiness
+  - Start the configured worker eagerly without a shell and own piped streams, the sanitized environment, and one shared startup deadline.
+  - Perform exact metadata-bearing discovery and tool listing and require the server identity and strict context schema.
+  - Completion is observable when tests cover successful readiness, spawn failure, identity, version, and schema mismatch, startup timeout, stderr drain, and environment isolation.
+  - _Depends: 2.1, 3.1_
+  - _Requirements: 4.1, 4.2, 4.7, 4.8, 8.3, 8.9, 8.10, 8.11_
+  - _Boundary: MCP Client_
+- [ ] 3.4 Implement bounded framing and request correlation
+  - Serialize writes with backpressure and decode fragmented or coalesced newline frames under the configured byte cap.
+  - Correlate generation-scoped monotonic IDs, validate exact context result fields, allow out-of-order replies, and reject pending saturation, malformed data, partial frames, and unknown live IDs.
+  - Completion is observable when protocol tests make each frame, correlation, DTO, and pending-limit outcome deterministic without a real worker.
+  - _Depends: 3.2, 3.3_
+  - _Requirements: 2.1, 2.2, 4.3, 4.7, 8.3, 8.6, 8.7, 8.9, 8.10, 8.11_
+  - _Boundary: MCP Client_
+- [ ] 3.5 Enforce lookup deadlines and bounded replacement
+  - Issue strict context calls under one host deadline, retire timed-out IDs, close failed generations, and apply no late data.
+  - Distinguish restart-eligible from permanent failures, permit at most one later replacement generation, and settle every pending request on exit.
+  - Completion is observable when tests cover backend errors, timeout races, unexpected exit, restart budget, permanent mismatches, and later-session recovery.
+  - _Depends: 3.4_
+  - _Requirements: 4.2, 4.3, 4.7, 8.3, 8.4, 8.5, 8.6, 8.7, 8.9, 8.10, 8.11_
+  - _Boundary: MCP Client_
+- [ ] 3.6 Implement bounded child shutdown
+  - Stop admissions, close stdin, settle waiters, perform TERM-to-KILL escalation, drain pipes, and reap the child within one absolute deadline.
+  - Keep close idempotent across ready, failed, restarting, and already-exited states.
+  - Completion is observable when every lifecycle state leaves no owned process or pending request after shutdown and emits only fixed diagnostics.
+  - _Depends: 3.5_
+  - _Requirements: 4.9, 8.3, 8.6, 8.7, 8.10, 8.11_
+  - _Boundary: MCP Client_
+- [ ] 3.7 Freeze shared lookup outcomes
+  - Share the first session-owned lookup and absolute deadline across concurrent hooks and freeze exact text or empty for every terminal outcome.
+  - Keep parent, child, resumed, and independent IDs separate without eviction or refresh after backend changes.
+  - Completion is observable when tests cover success, empty, failure, timeout, concurrency, session isolation, and immutable repeat results.
+  - _Depends: 3.2, 3.5, 3.6_
+  - _Requirements: 5.1, 5.2, 5.3, 5.4, 5.5, 5.6, 5.7, 5.8, 5.9, 6.5, 6.6, 6.7, 6.8, 8.4, 8.8_
+  - _Boundary: Context Runtime_
+- [ ] 3.8 Handle session teardown and identity reuse
+  - Reject missing session identities before transport activity and invalidate in-flight state on deletion or runtime close.
+  - Discard late completion by state identity, permit a reused textual ID to create fresh state, and clear every owned snapshot on disposal.
+  - Completion is observable when tests cover missing IDs, deletion during lookup, late completion, ID reuse, repeated removal, and close with no retained state.
+  - _Depends: 3.7_
+  - _Requirements: 5.10, 5.11, 5.12, 5.13, 5.14, 5.15, 8.5, 8.8_
+  - _Boundary: Context Runtime_
+
+- [ ] 4. Integrate context with both OpenCode generations
+- [ ] 4.1 (P) Add OpenCode v1 system injection
+  - Register the pinned experimental system transform and use only explicit session identity with no global fallback.
+  - Append the same frozen string on every primary or auxiliary transform while preserving existing system entries, capture hooks, deletion, and disposal behavior.
+  - Completion is observable when v1 tests prove exact registration, concurrent and repeated injection, missing-ID no-op, state removal, unchanged capture, and no startup-memory observation.
+  - _Depends: 3.8_
+  - _Requirements: 5.1, 5.10, 5.11, 5.12, 5.13, 5.14, 6.3, 6.4, 6.5, 6.6, 6.9, 7.1, 7.4, 7.5_
+  - _Boundary: V1 Adapter_
+- [ ] 4.2 (P) Add OpenCode v2 primary-context injection
+  - Register only the pinned primary context hook and append one text system part for an explicit session identity.
+  - Leave title, summary, compaction, and generation hooks without startup context while preserving existing prompt, tool, event, deletion, and cleanup behavior.
+  - Completion is observable when v2 tests prove exact registration, primary-only stable bytes, separate sessions, state removal, unchanged capture, and no startup-memory observation.
+  - _Depends: 3.8_
+  - _Requirements: 5.1, 5.9, 5.12, 5.13, 5.14, 6.3, 6.4, 6.5, 6.6, 6.9, 7.2, 7.3, 7.4, 7.5_
+  - _Boundary: V2 Adapter_
+- [ ] 4.3 Compose context and capture lifecycles
+  - Build context beside the unchanged capture runtime, start enabled retrieval eagerly, and route session deletion to both state owners.
+  - On unload, close both runtimes independently under the shared outer bound so one failure cannot suppress the other's cleanup.
+  - Update and contract-test the package settings table, clean-consumer environment contract, and packed artifact allowlist for enabled, disabled, and invalid context modes.
+  - Preserve no bundled worker and no new production dependency.
+  - Completion is observable when clean-consumer and package tests pass enabled, disabled, invalid, failure, unload, and artifact scenarios with no orphaned child.
+  - _Depends: 4.1, 4.2_
+  - _Requirements: 4.1, 4.2, 4.3, 4.4, 4.5, 4.6, 4.7, 4.8, 4.9, 4.10, 5.15, 6.4, 6.9, 7.4, 7.5, 7.6, 8.1, 8.2, 8.3, 8.12_
+  - _Boundary: Plugin Coordinator, Package Contract_
+
+- [ ] 5. Verify real process and host boundaries
+- [ ] 5.1 Add real context-worker artifact ownership
+  - Extend explicit E2E artifacts and validation with the real worker and a PID-observing wrapper.
+  - Reuse bounded process guards and prove direct retrieval-child exit before fallback process-group cleanup.
+  - Completion is observable when artifact tests reject missing or wrong workers and wrapper tests observe success, error, timeout, and cleanup exits.
+  - _Depends: 2.3, 4.3_
+  - _Requirements: 4.9, 7.4, 8.3, 8.6, 8.7, 8.11_
+  - _Boundary: Context Verification Harness, Process Guard_
+- [ ] 5.2 Extend the real iii engine with deterministic context data
+  - Register exact database execution behavior alongside existing harness capture and script ordered context success, empty, backend failure, malformed, and delayed replies.
+  - Capture database requests and lookup counts without exposing context fields in harness errors.
+  - Completion is observable when an engine test reaches six-tool readiness, serves one exact context call, and preserves every existing capture function.
+  - _Depends: 5.1_
+  - _Requirements: 3.5, 3.6, 4.7, 7.4, 8.3, 8.11_
+  - _Boundary: Context Verification Harness, Engine Harness_
+- [ ] 5.3 Add the offline model recorder and host controls
+  - Configure both pinned hosts with their bundled compatible providers at one authenticated loopback endpoint and deterministic streaming completion.
+  - Add exact v1 message completion and v2 prompt-plus-wait controls and reject unknown route, bearer, model, stream, or request count.
+  - Completion is observable when infrastructure tests drive one assistant completion per generation and record provider-visible system bytes without external services.
+  - _Depends: 5.1_
+  - _Requirements: 7.1, 7.2, 7.3, 8.10, 8.11_
+  - _Boundary: Context Verification Harness, Offline Provider_
+- [ ] 5.4 Add the loopback-only live-test sandbox
+  - Package iii, hosts, workers, recorder, and harness into a Linux Nix check with loopback-only networking and fail closed when sandboxing is unavailable.
+  - Keep networked development runs diagnostic-only and exclude registry or external credential requirements.
+  - Completion is observable when the check proves loopback model and iii traffic succeeds while a deliberate public-egress probe fails.
+  - _Depends: 5.1, 5.3_
+  - _Requirements: 7.6, 8.9, 8.10, 8.11_
+  - _Boundary: Nix Sandbox, Context Verification Harness_
+- [ ] 5.5 Exercise stable context across real sessions
+  - Run two requests in one session and one independent session against controlled changing backend data in both host generations.
+  - Assert one lookup per session, byte-identical repeat context, v1 auxiliary inclusion, v2 primary-only injection, preserved existing system content, and unchanged capture.
+  - Completion is observable when pinned v1 and v2 success scenarios pass serially inside the sandbox with no startup memory captured as evidence.
+  - _Depends: 5.2, 5.3, 5.4_
+  - _Requirements: 4.2, 4.3, 4.5, 5.1, 5.2, 5.3, 5.4, 5.7, 5.8, 5.9, 6.4, 6.5, 6.9, 7.1, 7.2, 7.3, 7.4_
+  - _Boundary: Context Verification Harness_
+- [ ] 5.6 Exercise resume and fail-open retrieval
+  - Resume an existing session in a fresh plugin runtime and drive empty, backend failure, and lookup-timeout responses.
+  - Assert one new runtime-local lookup, frozen empty behavior, shared-deadline release, no refresh, and no late context application.
+  - Completion is observable when both applicable host scenarios return primary work successfully with exact lookup counts and empty injection.
+  - _Depends: 5.5_
+  - _Requirements: 4.3, 4.7, 5.5, 5.6, 5.7, 5.8, 5.9, 6.6, 6.7, 6.8, 7.5, 8.1, 8.3, 8.4, 8.5, 8.8_
+  - _Boundary: Context Verification Harness_
+- [ ] 5.7 Exercise privacy, replacement, and process cleanup
+  - Drive child exit, one later replacement, permanent mismatch, deletion during lookup, and protected-sentinel scenarios.
+  - Assert bounded fixed diagnostics, exhausted replacement behavior, late-response isolation, and direct child exit before fallback cleanup.
+  - Completion is observable when every scenario leaves no protected output or owned process and unchanged capture shutdown still passes.
+  - _Depends: 5.6_
+  - _Requirements: 4.2, 4.9, 5.10, 5.11, 5.12, 5.13, 5.14, 5.15, 8.2, 8.3, 8.5, 8.6, 8.7, 8.8, 8.10, 8.11, 8.12_
+  - _Boundary: Context Verification Harness_
+- [ ] 5.8 Integrate Nix artifacts and supported-system gates
+  - Add migration-chain, worker, package, sandbox, and host artifacts through filtered Git-backed sources.
+  - Run package and compile contracts on ARM macOS, ARM Linux, and x86-64 Linux while keeping unsupported systems unclaimed.
+  - Completion is observable when every supported-system output evaluates or builds as designed and existing outputs remain available.
+  - _Depends: 1.5, 2.3, 5.4, 5.7_
+  - _Requirements: 3.6, 4.10, 7.6, 8.9, 8.10_
+  - _Boundary: Nix Integration_
+- [ ] 5.9 Integrate continuous verification
+  - Run the full sandboxed iii, PostgreSQL 17 and 18, MCP, package, and OpenCode matrix on x86-64 Linux alongside existing gates.
+  - Extend workflow shape verification without removing or weakening workspace, release, formatting, lint, dependency-policy, or flake checks.
+  - Completion is observable when every job and artifact is explicit and the workflow contract rejects any missing context or pre-existing gate.
+  - _Depends: 5.8_
+  - _Requirements: 3.6, 4.10, 7.6, 8.9, 8.10_
+  - _Boundary: CI Integration_
+
+- [ ] 6. Run the complete acceptance gate
+  - Run the package aggregate check; locked workspace tests; format; warning-free Clippy; dependency policy; release `mcp-worker`; database and MCP protocol fakes; PostgreSQL 17 and 18 context verifiers; the sandboxed v1 and v2 OpenCode matrix; and `nix flake check`.
+  - Route any failure to its owning prior boundary; do not repair another component inside this validation task.
+  - Completion is observable only when each named gate exits successfully, no protected value enters diagnostics, and no owned process remains.
+  - _Depends: 5.9_
+  - _Requirements: 1.1, 1.2, 1.3, 1.4, 1.5, 1.6, 2.1, 2.2, 2.3, 2.4, 2.5, 2.6, 2.7, 2.8, 3.1, 3.2, 3.3, 3.4, 3.5, 3.6, 4.1, 4.2, 4.3, 4.4, 4.5, 4.6, 4.7, 4.8, 4.9, 4.10, 5.1, 5.2, 5.3, 5.4, 5.5, 5.6, 5.7, 5.8, 5.9, 5.10, 5.11, 5.12, 5.13, 5.14, 5.15, 6.1, 6.2, 6.3, 6.4, 6.5, 6.6, 6.7, 6.8, 6.9, 7.1, 7.2, 7.3, 7.4, 7.5, 7.6, 8.1, 8.2, 8.3, 8.4, 8.5, 8.6, 8.7, 8.8, 8.9, 8.10, 8.11, 8.12_
+  - _Boundary: Final Validation_

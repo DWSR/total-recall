@@ -1,0 +1,6 @@
+[package]
+name = "session-post-processing-postgres-smoke"
+version = "0.1.0"
+edition.workspace = true
+rust-version.workspace = true
+publish = false

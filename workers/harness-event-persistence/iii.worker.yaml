@@ -1,0 +1,3 @@
+name: harness-event-persistence
+scripts:
+  start: ../../target/release/harness-event-persistence

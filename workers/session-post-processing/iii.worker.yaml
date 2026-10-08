@@ -1,0 +1,3 @@
+name: session-post-processing
+scripts:
+  start: ../../target/release/session-post-processing

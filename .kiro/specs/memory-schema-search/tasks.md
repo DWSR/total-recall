@@ -1,0 +1,146 @@
+# Implementation Plan
+
+- [x] 1. Establish workspace and test prerequisites
+- [x] 1.1 Register the memory-store and integration targets
+  - Add the independent library, direct PostgreSQL smoke target, and iii database protocol-fake binary to the locked workspace.
+  - Establish exports and executable shells without adding a public runtime function or worker.
+  - Completion is observable when all targets build with locked dependencies before feature logic is added.
+  - _Requirements: 7.1, 7.2, 7.3, 7.4, 7.5, 7.6_
+  - _Boundary: Workspace Integration_
+- [x] 1.2 Package the supported PostgreSQL search extensions
+  - Pin PostgreSQL 17 and 18 builds of `pg_textsearch` 1.4.0 and pgvector 0.8.6 or later with preload and restart behavior.
+  - Keep extension installation and upgrades outside application code.
+  - Completion is observable when local tooling builds both extension sets and reports their exact versions.
+  - _Requirements: 7.3, 7.4, 7.5_
+  - _Boundary: PostgreSQL Smoke Infrastructure_
+- [x] 1.3 Create isolated database and role fixtures
+  - Create deterministic setup and teardown for either supported PostgreSQL version with separate migration and restricted application identities.
+  - Leave table grants to the schema migration instead of assuming tables already exist.
+  - Completion is observable when one command starts a ready PG17 or PG18 fixture with both identities.
+  - _Requirements: 6.4, 7.1, 7.2, 7.3, 7.4, 7.5_
+  - _Boundary: PostgreSQL Smoke Infrastructure_
+
+- [x] 2. Build domain and schema foundations
+- [x] 2.1 Define canonical memory and embedding contracts
+  - Represent all memory fields separately from an embedding association keyed by memory ID and version.
+  - Validate memory fields, collections, timestamps, positive versions, and finite non-zero embedding vectors while preserving open taxonomies and collection order/duplicates.
+  - Completion is observable when tests accept valid memory/embedding values and reject invalid values without protected-data leaks.
+  - _Requirements: 1.1, 1.2, 1.3, 1.4, 1.5, 1.6, 1.7, 3.1, 3.2, 6.4, 7.1, 7.2_
+  - _Boundary: Contracts_
+- [x] 2.2 Define search, result, database-target, and failure contracts
+  - Represent validated BM25/vector queries, positive limits, complete embedding-free results, logical database targets, missing-parent failures, and conflicts.
+  - Completion is observable when tests reject invalid searches and allow complete results with relevance but no embedding.
+  - _Requirements: 3.3, 3.4, 4.1, 4.6, 5.1, 5.5, 6.1, 6.2, 6.4, 7.4, 7.5_
+  - _Boundary: Contracts_
+- [x] 2.3 (P) Create immutable memory and embedding storage
+  - Define `memories` with the composite primary key and no vector column; define `memory_embeddings` with the same primary key, a restrictive composite foreign key, and one required validated vector.
+  - Add application grants for insert/select while denying update/delete and preserving exclusions for raw-ledger foreign keys, vector indexes, partitioning, and retention.
+  - Completion is observable when schema checks accept independent valid rows and reject invalid, duplicate, or orphan embedding rows.
+  - _Requirements: 1.1, 1.2, 1.3, 1.4, 1.5, 1.6, 2.1, 2.2, 2.3, 2.4, 3.1, 3.2, 3.3, 3.4, 3.5_
+  - _Boundary: Schema Migration_
+  - _Depends: 1.3_
+- [x] 2.4 Add transactionally current lexical search state
+  - Add one current head per memory ID and an `english` BM25 document over title, content, and concepts.
+  - Use a secured migration-owned trigger that advances only to greater versions and cannot be directly executed.
+  - Completion is observable when lower versions remain historical, greater versions become sole heads, and trigger failures roll back memory inserts.
+  - _Requirements: 2.4, 2.5, 2.6, 4.2, 4.3, 5.2_
+  - _Boundary: Schema Migration_
+
+- [x] 3. Implement independent persistence through iii
+- [x] 3.1 Establish the memory database port and adapter shell
+  - Define four validated operations, recording/failing seams, `IIIClient` construction, a shared invocation envelope, and opaque infrastructure failure mapping.
+  - Completion is observable when service tests can substitute the port and the adapter constructs without a runtime worker.
+  - _Requirements: 2.6, 3.6, 6.3, 6.4_
+  - _Boundary: MemoryDatabase_
+- [x] 3.2 Implement insert-only memory persistence
+  - Bind canonical fields and collections without a vector parameter; confirm returned keys and map duplicate, malformed, and failed outcomes.
+  - Verify memory persistence remains independent of embedding availability.
+  - Completion is observable when one confirmed insert stores one immutable memory version and every other outcome is a typed failure.
+  - _Requirements: 1.1, 1.2, 1.3, 1.6, 2.1, 2.2, 2.3, 2.4, 2.6, 3.5, 6.3, 6.4, 7.1_
+  - _Boundary: MemoryDatabase_
+- [x] 3.3 Implement insert-only embedding persistence
+  - Bind ID/version plus one explicit text-to-vector cast; confirm returned keys and map missing-parent, duplicate, malformed, and failed outcomes without memory mutation.
+  - Completion is observable when a committed parent accepts one immutable embedding and every orphan, duplicate, or failed write returns a typed failure.
+  - _Requirements: 3.1, 3.2, 3.3, 3.4, 3.5, 3.6, 6.4, 7.2_
+  - _Boundary: MemoryDatabase_
+
+- [x] 4. Add latest-version searches and service integration
+- [x] 4.1 Implement deterministic BM25 search
+  - Consume validated lexical queries and search current heads using `english` BM25 over title, content, and concepts.
+  - Return complete embedding-free rows ordered by positive relevance, `C`-collated ID, version, then requested limit; make no phrase, field-weight, or hybrid claims.
+  - Completion is observable when BM25 SQL and decoding produce latest-only deterministic complete results.
+  - _Requirements: 4.1, 4.2, 4.3, 4.4, 4.5, 4.7, 6.1, 6.2, 6.3, 6.4_
+  - _Boundary: MemoryDatabase_
+- [x] 4.2 Implement guarded exact cosine search
+  - Join current head to embedding to memory and evaluate cosine distance only inside an evaluation-safe branch after dimension and norm guards.
+  - Exclude IDs whose latest version lacks an embedding; return deterministic embedding-free results with no older fallback, ANN, or hybrid claim.
+  - Completion is observable when compatible current embeddings rank exactly and incompatible/missing latest embeddings cannot fail or fall back.
+  - _Requirements: 5.1, 5.2, 5.3, 5.4, 5.6, 6.1, 6.2, 6.3, 6.4_
+  - _Boundary: MemoryDatabase_
+- [x] 4.3 Integrate validation with all four operations
+  - Validate memory, embedding, BM25, and vector requests before calling the port while preserving complete-or-error outcomes.
+  - Completion is observable when one in-process service exposes all four operations, invalid requests make no iii call, and failures remain content-opaque.
+  - _Requirements: 1.6, 2.6, 3.6, 4.6, 5.5, 6.3, 6.4, 7.1, 7.2_
+  - _Boundary: MemoryStore_
+
+- [x] 5. Verify database and iii integration boundaries
+- [x] 5.1 Verify memory and embedding constraints and roles against PostgreSQL
+  - Apply the complete migration on PostgreSQL 17 and 18 and exercise valid/invalid memories, embeddings, duplicates, orphans, restrictive foreign keys, and restricted-role grants.
+  - Completion is observable when both versions enforce canonical and one-to-one embedding contracts identically.
+  - _Requirements: 1.1, 1.2, 1.3, 1.4, 1.5, 1.6, 2.1, 2.2, 2.3, 2.4, 3.1, 3.2, 3.3, 3.4, 3.5, 6.4, 7.1, 7.2_
+  - _Boundary: PostgreSQL Smoke_
+  - _Depends: 1.2, 1.3, 2.3, 2.4_
+- [x] 5.2 Verify independent embedding lifecycle and concurrency
+  - Exercise parent-before-child ordering, pre-parent failure, historical embeddings, post-head insertion, and concurrent duplicate embeddings.
+  - Completion is observable when exactly one concurrent association succeeds and embeddings never mutate memories or heads.
+  - _Requirements: 3.1, 3.3, 3.4, 3.5, 3.6, 7.2_
+  - _Boundary: PostgreSQL Smoke_
+- [x] 5.3 Verify memory-version head transitions
+  - Exercise initial, newer, lower, concurrent, duplicate, and trigger-failing memory versions.
+  - Completion is observable when both PostgreSQL versions converge on greatest-version heads without history loss.
+  - _Requirements: 2.1, 2.2, 2.3, 2.4, 2.5, 2.6, 7.1_
+  - _Boundary: PostgreSQL Smoke_
+- [x] 5.4 Verify BM25 semantics against PostgreSQL
+  - Prove title/content/concept matches, current-only corpus statistics, empty matches, limits, scores, ties, JSON projections, and omitted embeddings.
+  - Completion is observable when fixtures produce equivalent requirement-compliant lexical results on PostgreSQL 17 and 18.
+  - _Requirements: 4.1, 4.2, 4.3, 4.4, 4.5, 4.6, 4.7, 6.1, 6.2, 7.3, 7.4_
+  - _Boundary: PostgreSQL Smoke_
+- [x] 5.5 Verify exact vector semantics against PostgreSQL
+  - Prove join behavior, latest-without-embedding suppression, post-head embedding visibility, cosine ordering, dimensions, zero-vector rejection, limits, ties, and omitted embeddings.
+  - Completion is observable when PostgreSQL 17 and 18 return identical rankings without dimension errors or older-version fallback.
+  - _Requirements: 5.1, 5.2, 5.3, 5.4, 5.5, 5.6, 6.1, 6.2, 7.4, 7.5_
+  - _Boundary: PostgreSQL Smoke_
+- [x] 5.6 (P) Verify the iii database protocol
+  - Run all four adapter operations against a loopback `database::execute` fake and validate targets, SQL, values, casts, envelopes, failures, malformed responses, and protected sentinels.
+  - Completion is observable when the fake accepts compliant operations and rejects every protocol or privacy mismatch.
+  - _Requirements: 2.6, 3.6, 4.1, 4.6, 5.1, 5.5, 6.1, 6.2, 6.3, 6.4, 7.6_
+  - _Boundary: Database Engine Fake_
+  - _Depends: 3.2, 3.3, 4.1, 4.2_
+
+- [x] 6. Integrate continuous verification
+  - Add the PostgreSQL 17/18 direct-database matrix and iii protocol fake while preserving all existing checks.
+  - Completion is observable when the complete suite passes without a deployed database worker or production database.
+  - _Requirements: 7.1, 7.2, 7.3, 7.4, 7.5, 7.6_
+  - _Boundary: Workspace Integration, Verification_
+  - _Depends: 5.1, 5.2, 5.3, 5.4, 5.5, 5.6_
+
+- [x] 7. Reconcile PostgreSQL representability contracts
+- [x] 7.1 Reject nonrepresentable persistence inputs
+  - Reject NUL-bearing persistence-bound text, fractional-second or unsupported-year canonical timestamps, and vectors that exceed PostgreSQL's float4 or 16,000-component limits before invoking the database port.
+  - Completion is observable when contract and service tests reject every non-wire-compatible value without a database call while preserving valid wire values exactly.
+  - _Requirements: 1.1, 1.3, 1.4, 1.6, 1.8, 3.2, 3.6, 4.6, 5.5, 6.4, 7.7_
+  - _Boundary: Contracts, MemoryStore_
+  - _Depends: 4.3, 5.6_
+
+## Implementation Notes
+
+- In this sandbox, linked-worktree metadata blocks `nix develop --command`; use `nix develop path:. --command` with an isolated Cargo cache and target directory for validation.
+- Direct PostgreSQL startup is blocked by sandbox SysV IPC; run the PG17/PG18 extension verifiers as Nix package builds in the builder context.
+- The locked Nixpkgs revision no longer supports `x86_64-darwin`, so `nix flake check --all-systems` has a pre-existing incompatible-system failure.
+- For intentionally failing Nix fixture mutations, use plain `nix build --no-link`; `--rebuild` can fail before executing an invalid derivation.
+- pgvector stores finite `float4` values with a 16,000-dimension cap; task 3 must handle contract-to-database vector compatibility without adding a fixed dimension.
+- The unreleased `0001_memory_schema_search.sql` may evolve during this feature; create a forward migration for any change after it is deployed.
+- A new isolated Cargo home may lack registry metadata; allow one online resolution before using offline validation.
+- `database::execute` returns PostgreSQL `BIGINT` values as JSON strings; use explicit text casts and strict response confirmation for future adapter operations.
+- Coordinate PostgreSQL concurrency tests with advisory gates and observed `pg_stat_activity` lock states, never timing sleeps.
+- Persistence representability is part of the input contract: persistence-bound text is NUL-free, canonical timestamps use UTC whole seconds in years `0001` through `9999`, and vectors must have 1 through 16,000 finite components that round-trip exactly through float4.

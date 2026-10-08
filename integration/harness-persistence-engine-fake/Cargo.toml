@@ -1,0 +1,17 @@
+[package]
+name = "harness-persistence-engine-fake"
+version = "0.1.0"
+edition.workspace = true
+rust-version.workspace = true
+publish = false
+
+[dependencies]
+futures-util.workspace = true
+harness-event-persistence = { path = "../../workers/harness-event-persistence" }
+schemars.workspace = true
+serde.workspace = true
+serde_json.workspace = true
+serde_yaml.workspace = true
+tokio = { workspace = true, features = ["io-util", "net", "process", "sync", "time"] }
+tokio-tungstenite.workspace = true
+uuid.workspace = true

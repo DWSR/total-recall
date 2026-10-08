@@ -1,0 +1,24 @@
+[package]
+name = "harness-ingestion"
+version = "0.1.0"
+edition.workspace = true
+rust-version.workspace = true
+publish = false
+
+[dependencies]
+async-trait.workspace = true
+chrono.workspace = true
+iii-sdk.workspace = true
+pbjson.workspace = true
+pbjson-types.workspace = true
+prost.workspace = true
+schemars.workspace = true
+serde.workspace = true
+serde_json.workspace = true
+thiserror.workspace = true
+tokio.workspace = true
+uuid.workspace = true
+
+[build-dependencies]
+pbjson-build.workspace = true
+prost-build.workspace = true

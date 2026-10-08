@@ -1,0 +1,322 @@
+name: CI
+
+on:
+  push:
+  pull_request:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: ${{ github.workflow }}-${{ github.event.pull_request.number || github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  test:
+    name: Unit and end-to-end tests
+    runs-on: ubuntu-latest
+    timeout-minutes: 40
+    env:
+      CARGO_INCREMENTAL: "0"
+      CARGO_PROFILE_DEV_DEBUG: "0"
+      CARGO_PROFILE_TEST_DEBUG: "0"
+      RUST_BACKTRACE: "1"
+
+    steps:
+      - name: Check out repository
+        uses: actions/checkout@v4
+
+      - name: Install Nix
+        uses: DeterminateSystems/nix-installer-action@main
+
+      - name: Configure Nix cache
+        uses: DeterminateSystems/magic-nix-cache-action@main
+
+      - name: Report initial disk usage
+        run: df -h . /nix/store
+
+      - name: Check flake
+        run: nix flake check
+
+      - name: Run unit tests
+        run: nix develop --command cargo test --workspace --locked
+
+      - name: Run knowledge graph store tests
+        run: nix develop --command cargo test --locked --package knowledge-graph-store
+
+      - name: Check formatting
+        run: nix develop --command cargo fmt --all --check
+
+      - name: Lint workflow
+        run: nix develop --command actionlint
+
+      - name: Check and pack plugin package
+        working-directory: integrations/opencode-harness-events
+        run: |
+          nix develop --command bun install --frozen-lockfile
+          nix develop --command bun run check
+          nix develop --command bun run pack
+
+      - name: Run clippy
+        run: nix develop --command cargo-clippy --workspace --all-targets --locked -- -D warnings
+
+      - name: Build harness events CLI release
+        run: nix develop --command cargo build --locked --release --package harness-events-cli
+
+      - name: Check dependency policy
+        run: nix develop --command cargo deny --locked check licenses advisories
+
+      - name: Build release worker
+        run: nix develop --command cargo build --locked --release --package harness-ingestion
+
+      - name: Build persistence release worker
+        run: nix develop --command cargo build --locked --release --package harness-event-persistence
+
+      - name: Build MCP release worker
+        run: nix develop --command cargo build --locked --release --package mcp-worker
+
+      - name: Build memory embedding release worker
+        run: nix develop --command cargo build --locked --release --package memory-embedding
+
+      - name: Build session post-processing release worker
+        run: nix develop --command cargo build --locked --release --package session-post-processing
+
+      - name: Run end-to-end smoke test
+        run: >-
+          nix develop --command cargo run --locked --release
+          --package harness-engine-fake --
+          --manifest "$PWD/workers/harness-ingestion/iii.worker.yaml"
+
+      - name: Run persistence protocol fake
+        run: >-
+          nix develop --command cargo run --locked --release
+          --package harness-persistence-engine-fake --
+          --manifest "$PWD/workers/harness-event-persistence/iii.worker.yaml"
+
+      - name: Run MCP protocol fake
+        run: >-
+          nix develop --command cargo run --locked --release
+          --package mcp-worker-fake --
+          --worker "$PWD/target/release/mcp-worker"
+
+      - name: Run memory embedding protocol fake
+        run: >-
+          nix develop --command cargo run --locked --release
+          --package memory-embedding-engine-fake --
+          --manifest "$PWD/workers/memory-embedding/iii.worker.yaml"
+
+      - name: Run session post-processing protocol fake
+        run: >-
+          nix develop --command cargo run --locked --release
+          --package session-post-processing-engine-fake --
+          --manifest "$PWD/workers/session-post-processing/iii.worker.yaml"
+
+      - name: Run OpenCode harness events live tests
+        run: |
+          nix develop --command bash -euo pipefail <<EOF
+            export III_BIN="\$(command -v iii)"
+            export OPENCODE_V1_BIN="\$(command -v opencode-v1)"
+            export OPENCODE_V2_BIN="\$(command -v opencode-v2)"
+            export HARNESS_EVENTS_BIN="\$PWD/target/release/harness-events"
+            export PLUGIN_TARBALL="\$PWD/integrations/opencode-harness-events/opencode-harness-events-0.1.0.tgz"
+
+            test -f "\$III_BIN"
+            test -f "\$OPENCODE_V1_BIN"
+            test -f "\$OPENCODE_V2_BIN"
+            test -f "\$HARNESS_EVENTS_BIN"
+            test -f "\$PLUGIN_TARBALL"
+
+            cargo test --locked --package opencode-harness-events-e2e --test engine_live -- --ignored --test-threads=1
+            cargo test --locked --package opencode-harness-events-e2e --test live -- --ignored --test-threads=1
+          EOF
+
+      - name: Report build disk usage
+        if: always()
+        run: |
+          df -h . /nix/store
+          for path in target /nix/store; do
+            if [ -d "$path" ]; then
+              du -sh "$path"
+            fi
+          done
+
+  pi-node-lts:
+    name: Pi Node ${{ matrix.node }} LTS
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    env:
+      RUST_BACKTRACE: "1"
+      NODE_MAJOR: ${{ matrix.node }}
+    strategy:
+      fail-fast: false
+      matrix:
+        node: [24]
+
+    steps:
+      - name: Check out repository
+        uses: actions/checkout@v4
+
+      - name: Install Nix
+        uses: DeterminateSystems/nix-installer-action@main
+
+      - name: Configure Nix cache
+        uses: DeterminateSystems/magic-nix-cache-action@main
+
+      - name: Verify package and live Pi integration
+        shell: bash
+        run: |
+          nix develop ".#node${NODE_MAJOR}" --command bash <<'EOF'
+          set -euo pipefail
+
+          repo_root="$(pwd -P)"
+          package_dir="$repo_root/integrations/pi-harness-events"
+          node_path="$(command -v node)"
+          iii_path="$(command -v iii)"
+          node_version="$("$node_path" --version)"
+          iii_version="$("$iii_path" --version)"
+
+          case "$node_path" in
+            /*) ;;
+            *)
+              printf 'Node path is not absolute: %s\n' "$node_path" >&2
+              exit 1
+              ;;
+          esac
+          case "$iii_path" in
+            /*) ;;
+            *)
+              printf 'iii path is not absolute: %s\n' "$iii_path" >&2
+              exit 1
+              ;;
+          esac
+          case "$node_version" in
+            "v${NODE_MAJOR}".*) ;;
+            *)
+              printf 'expected Node %s, got %s\n' "$NODE_MAJOR" "$node_version" >&2
+              exit 1
+              ;;
+          esac
+          if [ "$iii_version" != "0.24.0" ]; then
+            printf 'expected iii 0.24.0, got %s\n' "$iii_version" >&2
+            exit 1
+          fi
+
+          cd "$package_dir"
+          npm ci
+          npm run check
+
+          stage_dir="$(mktemp -d)"
+          trap 'rm -rf "$stage_dir"' EXIT
+          pack_output="$(npm pack --json --ignore-scripts --pack-destination "$stage_dir")"
+          archive_name="$(
+            "$node_path" -e '
+              const pack_output = process.argv[1];
+              const archives = JSON.parse(pack_output);
+              const archive = archives?.["@dwsr/pi-harness-events"];
+              if (archives === null || typeof archives !== "object" || Array.isArray(archives) || Object.keys(archives).length !== 1 || typeof archive?.filename !== "string") {
+                throw new Error("npm pack did not report exactly one archive");
+              }
+              process.stdout.write(archive.filename);
+            ' "$pack_output"
+          )"
+          archive_path="$stage_dir/$archive_name"
+          test -f "$archive_path"
+
+          consumer_dir="$(mktemp -d "$stage_dir/consumer.XXXXXX")"
+          printf '%s\n' '{"name":"pi-harness-events-ci-consumer","private":true,"version":"0.0.0"}' \
+            > "$consumer_dir/package.json"
+          (
+            cd "$consumer_dir"
+            npm install --offline --ignore-scripts --legacy-peer-deps --no-package-lock --no-audit --no-fund "$archive_path"
+          )
+          extension_root="$(cd "$consumer_dir/node_modules/@dwsr/pi-harness-events" && pwd -P)"
+
+          pi_cli_path="$(cd "$package_dir/node_modules/@earendil-works/pi-coding-agent" && pwd -P)/dist/bundle/cli.js"
+          scripted_provider_path="$package_dir/test/fixtures/scripted-provider.ts"
+          harness_events_path="$repo_root/target/release/harness-events"
+          test -f "$pi_cli_path"
+          test -f "$scripted_provider_path"
+
+          cd "$repo_root"
+          cargo build --locked --release --package harness-events-cli
+          test -x "$harness_events_path"
+
+          PI_HARNESS_EVENTS_E2E_NODE="$node_path" \
+          PI_HARNESS_EVENTS_E2E_PI_CLI="$pi_cli_path" \
+          PI_HARNESS_EVENTS_E2E_III="$iii_path" \
+          PI_HARNESS_EVENTS_E2E_HARNESS_EVENTS="$harness_events_path" \
+          PI_HARNESS_EVENTS_E2E_EXTENSION_ROOT="$extension_root" \
+          PI_HARNESS_EVENTS_E2E_SCRIPTED_PROVIDER="$scripted_provider_path" \
+          cargo test --locked --package pi-harness-events-e2e --test live -- --ignored --test-threads=1
+
+          EOF
+
+  postgresql-direct-smoke:
+    name: PostgreSQL ${{ matrix.major }} direct smoke
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - major: 17
+            package_prefix: postgresql17
+          - major: 18
+            package_prefix: postgresql18
+
+    steps:
+      - name: Check out repository
+        uses: actions/checkout@v4
+
+      - name: Install Nix
+        uses: DeterminateSystems/nix-installer-action@main
+
+      - name: Configure Nix cache
+        uses: DeterminateSystems/magic-nix-cache-action@main
+
+      - name: Run direct PostgreSQL verifiers
+        run: >-
+          nix build --print-build-logs --no-link
+          .#${{ matrix.package_prefix }}-search-verify
+          .#${{ matrix.package_prefix }}-search-fixture-verify
+          .#${{ matrix.package_prefix }}-memory-storage-verify
+          .#${{ matrix.package_prefix }}-memory-search-heads-verify
+          .#${{ matrix.package_prefix }}-memory-embedding-lifecycle-verify
+          .#${{ matrix.package_prefix }}-memory-embedding-work-verify
+          .#${{ matrix.package_prefix }}-memory-version-heads-verify
+          .#${{ matrix.package_prefix }}-memory-bm25-verify
+          .#${{ matrix.package_prefix }}-memory-vector-verify
+          .#${{ matrix.package_prefix }}-session-post-processing-verify
+          .#${{ matrix.package_prefix }}-knowledge-graph-schema-verify
+          .#${{ matrix.package_prefix }}-knowledge-graph-mutation-verify
+          .#${{ matrix.package_prefix }}-knowledge-graph-traversal-verify
+
+      - name: Run native memory-history MCP verifier
+        run: nix run ".#${{ matrix.package_prefix }}-memory-history-mcp-verify"
+
+  iii-database-protocol-fake:
+    name: iii database protocol fake
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    env:
+      RUST_BACKTRACE: "1"
+
+    steps:
+      - name: Check out repository
+        uses: actions/checkout@v4
+
+      - name: Install Nix
+        uses: DeterminateSystems/nix-installer-action@main
+
+      - name: Configure Nix cache
+        uses: DeterminateSystems/magic-nix-cache-action@main
+
+      - name: Run protocol tests
+        run: nix develop --command cargo test -p memory-database-engine-fake --locked
+
+      - name: Run standalone protocol verifier
+        run: nix develop --command cargo run -p memory-database-engine-fake --locked
+
+      - name: Run knowledge graph database protocol fake
+        run: nix develop --command cargo run --locked --release --package knowledge-graph-database-engine-fake

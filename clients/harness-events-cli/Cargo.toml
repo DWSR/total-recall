@@ -1,0 +1,33 @@
+[package]
+name = "harness-events-cli"
+version = "0.1.0"
+edition.workspace = true
+rust-version.workspace = true
+publish = false
+autobins = false
+
+[[bin]]
+name = "harness-events"
+path = "src/main.rs"
+
+[dependencies]
+clap.workspace = true
+iii-sdk.workspace = true
+pbjson.workspace = true
+pbjson-types.workspace = true
+prost.workspace = true
+serde.workspace = true
+serde_json = { workspace = true, features = ["arbitrary_precision"] }
+thiserror.workspace = true
+tokio.workspace = true
+uuid.workspace = true
+
+[dev-dependencies]
+futures-util.workspace = true
+harness-ingestion = { path = "../../workers/harness-ingestion" }
+tokio = { workspace = true, features = ["io-util", "net", "process", "sync", "time"] }
+tokio-tungstenite.workspace = true
+
+[build-dependencies]
+pbjson-build.workspace = true
+prost-build.workspace = true
