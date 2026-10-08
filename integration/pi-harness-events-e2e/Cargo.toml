@@ -7,7 +7,7 @@ publish = false
 
 [dependencies]
 iii-sdk.workspace = true
-libc = "=0.2.189"
+libc = "=0.2.190"
 serde_json.workspace = true
 thiserror.workspace = true
 tokio = { workspace = true, features = ["io-util", "net", "process", "sync", "time"] }
