@@ -28,7 +28,7 @@ test("format:check rejects an unformatted package README", async () => {
       encoding: "utf8",
     });
 
-    assert.equal(result.error, undefined, result.error?.message);
+    assert.equal(result.error, undefined, result.error?.message ?? "spawn failed");
     assert.notEqual(result.status, 0);
     assert.match(`${result.stdout}\n${result.stderr}`, /README\.md/);
   } finally {
@@ -74,7 +74,7 @@ test("pack:check rejects tests, fixtures, lockfiles, JavaScript, and development
       encoding: "utf8",
     });
 
-    assert.equal(result.error, undefined, result.error?.message);
+    assert.equal(result.error, undefined, result.error?.message ?? "spawn failed");
     assert.notEqual(result.status, 0);
     const output = `${result.stdout}\n${result.stderr}`;
 
@@ -123,7 +123,7 @@ test("pack:check rejects optional production dependencies", async () => {
       encoding: "utf8",
     });
 
-    assert.equal(result.error, undefined, result.error?.message);
+    assert.equal(result.error, undefined, result.error?.message ?? "spawn failed");
     assert.notEqual(result.status, 0);
     assert.match(
       `${result.stdout}\n${result.stderr}`,
@@ -146,6 +146,6 @@ test("pack:check accepts the staged source package", () => {
     encoding: "utf8",
   });
 
-  assert.equal(result.error, undefined, result.error?.message);
+  assert.equal(result.error, undefined, result.error?.message ?? "spawn failed");
   assert.equal(result.status, 0, `${result.stdout}\n${result.stderr}`);
 });
