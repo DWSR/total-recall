@@ -111,7 +111,7 @@ async fn verify(server: &ProductionServer) -> Result<(), String> {
     let first_page = success_content(&first_page, "memory_list_versions")?;
     expect_version_page(
         first_page,
-        &[(2, "2026-09-28T12:01:00.654321+00:00")],
+        &[(2, "2026-09-28T12:01:00.765432+00:00")],
         Some(1),
     )?;
 

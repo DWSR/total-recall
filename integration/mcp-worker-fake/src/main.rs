@@ -246,7 +246,7 @@ ORDER BY scored_heads.relevance DESC,
 LIMIT $2::text::bigint"#;
 const VERSION_LIST_SQL: &str = r#"SELECT
     memory.version::text AS version,
-    memory.updated_at
+    to_char(memory.updated_at AT TIME ZONE 'UTC', 'YYYY-MM-DD"T"HH24:MI:SS.US+00:00') AS updated_at
 FROM public.memories AS memory
 WHERE memory.id = $1::text
 ORDER BY memory.version DESC
@@ -258,8 +258,8 @@ const EXACT_MEMORY_SQL: &str = r#"SELECT
     memory.type AS memory_type,
     memory.title,
     memory.content,
-    memory.created_at,
-    memory.updated_at,
+    to_char(memory.created_at AT TIME ZONE 'UTC', 'YYYY-MM-DD"T"HH24:MI:SS.US+00:00') AS created_at,
+    to_char(memory.updated_at AT TIME ZONE 'UTC', 'YYYY-MM-DD"T"HH24:MI:SS.US+00:00') AS updated_at,
     to_json(memory.concepts) AS concepts,
     to_json(memory.files) AS files,
     to_json(memory.session_ids) AS session_ids,
@@ -273,8 +273,8 @@ const LATEST_MEMORY_SQL: &str = r#"SELECT
     memory.type AS memory_type,
     memory.title,
     memory.content,
-    memory.created_at,
-    memory.updated_at,
+    to_char(memory.created_at AT TIME ZONE 'UTC', 'YYYY-MM-DD"T"HH24:MI:SS.US+00:00') AS created_at,
+    to_char(memory.updated_at AT TIME ZONE 'UTC', 'YYYY-MM-DD"T"HH24:MI:SS.US+00:00') AS updated_at,
     to_json(memory.concepts) AS concepts,
     to_json(memory.files) AS files,
     to_json(memory.session_ids) AS session_ids,
@@ -3800,7 +3800,7 @@ fn assert_memory_version_list_request(
     let sql = invocation.sql.to_ascii_lowercase();
     require(
         sql.contains(
-            "select\n    memory.version::text as version,\n    memory.updated_at\nfrom public.memories as memory",
+            "select\n    memory.version::text as version,\n    to_char(memory.updated_at at time zone 'utc', 'yyyy-mm-dd\"t\"hh24:mi:ss.us+00:00') as updated_at\nfrom public.memories as memory",
         ) && sql.contains("where memory.id = $1::text")
             && sql.contains("order by memory.version desc")
             && sql.contains("offset $2::text::bigint")

@@ -543,7 +543,7 @@ async fn memory_list_versions_calls_the_service_once_and_serializes_the_advertis
             "memory_list_versions",
             json!({
                 "versions": [
-                    { "version": 4, "updated_at": timestamp() },
+                    { "version": 4, "updated_at": "2026-09-20T00:00:00.123456Z" },
                     { "version": 3, "updated_at": timestamp() },
                 ],
                 "next_offset": null,

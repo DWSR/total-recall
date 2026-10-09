@@ -294,22 +294,28 @@ fn success_dtos_project_complete_score_free_memories_and_narrow_versions() {
 }
 
 #[test]
-fn memory_dtos_normalize_created_and_updated_timestamps_to_whole_seconds() {
+fn memory_dtos_preserve_created_and_updated_timestamp_precision() {
     let mut canonical = canonical_memory();
     canonical.created_at = timestamp("2026-09-20T10:00:00.123456Z");
     canonical.updated_at = timestamp("2026-09-20T10:05:00.654321Z");
 
     let exact = serde_json::to_value(MemoryDto::from(canonical.clone())).unwrap();
-    assert_eq!(exact["created_at"], "2026-09-20T10:00:00Z");
-    assert_eq!(exact["updated_at"], "2026-09-20T10:05:00Z");
+    assert_eq!(exact["created_at"], "2026-09-20T10:00:00.123456Z");
+    assert_eq!(exact["updated_at"], "2026-09-20T10:05:00.654321Z");
 
     let search_result = MemorySearchResult::try_new(canonical.try_into().unwrap(), 0.875).unwrap();
     let search = serde_json::to_value(MemoryResults {
         results: vec![MemoryDto::from(&search_result)],
     })
     .unwrap();
-    assert_eq!(search["results"][0]["created_at"], "2026-09-20T10:00:00Z");
-    assert_eq!(search["results"][0]["updated_at"], "2026-09-20T10:05:00Z");
+    assert_eq!(
+        search["results"][0]["created_at"],
+        "2026-09-20T10:00:00.123456Z"
+    );
+    assert_eq!(
+        search["results"][0]["updated_at"],
+        "2026-09-20T10:05:00.654321Z"
+    );
 }
 
 fn tool(name: &str, input_schema: Value, output_schema: Value) -> Value {
