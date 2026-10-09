@@ -85,8 +85,6 @@ const ACCEPTED_NATIVE_KINDS: ReadonlySet<string> = new Set<AcceptedNativeKind>([
   "message.part.updated",
   "session.error",
 ]);
-const TRAILING_SEPARATORS = /[\\/]+$/;
-
 function isRecord(value: unknown): value is UnknownRecord {
   return typeof value === "object" && value !== null && !Array.isArray(value);
 }
@@ -272,21 +270,30 @@ function hookDetails(value: unknown): EventDetails | undefined {
 }
 
 function projectBasename(path: string): string | undefined {
-  const normalized = path.trim().replace(TRAILING_SEPARATORS, "");
-  if (normalized.length === 0) {
+  const normalized = path.trim();
+  let end = normalized.length;
+  while (end > 0 && isPathSeparator(normalized.charAt(end - 1))) {
+    end -= 1;
+  }
+
+  if (end === 0) {
     return undefined;
   }
 
   const slash = Math.max(
-    normalized.lastIndexOf("/"),
-    normalized.lastIndexOf("\\"),
+    normalized.lastIndexOf("/", end - 1),
+    normalized.lastIndexOf("\\", end - 1),
   );
-  const basename = normalized.slice(slash + 1);
+  const basename = normalized.slice(slash + 1, end);
   if (basename.length === 0) {
     return undefined;
   }
 
   return basename;
+}
+
+function isPathSeparator(value: string): boolean {
+  return value === "/" || value === "\\";
 }
 
 // biome-ignore lint/complexity/noExcessiveCognitiveComplexity: Recursive narrowing keeps the JSON boundary atomic.
