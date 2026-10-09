@@ -47,7 +47,7 @@ rkyv = "=0.8.18"
 schemars = { version = "=0.8.22", features = ["derive"] }
 serde = { version = "=1.0.229", features = ["derive"] }
 serde_json = "=1.0.151"
-sha2 = "=0.10.9"
+sha2 = "=0.11.0"
 serde_yaml = "=0.9.34"
 thiserror = "=2.0.21"
 tokio = { version = "=1.53.2", features = ["io-std", "io-util", "macros", "rt-multi-thread", "signal", "sync", "time"] }
