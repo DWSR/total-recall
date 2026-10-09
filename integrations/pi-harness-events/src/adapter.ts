@@ -58,7 +58,7 @@ export interface ObservationSelection {
 
 export interface NativeObservationEnvelope {
   readonly source: "pi";
-  readonly version: "0.86.1";
+  readonly version: "1.0.0";
   readonly event: AcceptedObservationNativeEvent;
   readonly payload: JsonObject;
 }
@@ -113,7 +113,7 @@ export function projectNativeEvent(
     try {
       return {
         source: "pi",
-        version: "0.86.1",
+        version: "1.0.0",
         event,
         payload: normalizeJsonObject(projection.payload),
       };

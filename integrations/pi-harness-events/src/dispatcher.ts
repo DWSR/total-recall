@@ -631,7 +631,7 @@ function prepareCommandInvocation(submission: Submission): CommandPreparation {
 
     const stdin = JSON.stringify({
       source: "pi",
-      version: "0.86.1",
+      version: "1.0.0",
       event: nativeEvent,
       payload: submission.data,
     });

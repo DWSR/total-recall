@@ -125,7 +125,7 @@ function assertPackageManifest(value: unknown): string {
     throw new Error("installed package manifest does not declare the Pi peer dependency");
   }
 
-  if (!hasStringRecordEntry(value.devDependencies, "@earendil-works/pi-coding-agent", "0.86.1")) {
+  if (!hasStringRecordEntry(value.devDependencies, "@earendil-works/pi-coding-agent", "1.0.0")) {
     throw new Error("installed package manifest does not pin Pi for development verification");
   }
 
