@@ -170,7 +170,7 @@ fn content_fingerprint(
     let mut raw_digest = [0; 32];
     raw_digest.copy_from_slice(&digest);
     Ok(ContentFingerprint {
-        hexadecimal: format!("{digest:x}"),
+        hexadecimal: raw_digest.iter().map(|b| format!("{b:02x}")).collect(),
         digest: raw_digest,
     })
 }
