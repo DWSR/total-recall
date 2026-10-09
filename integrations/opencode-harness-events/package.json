@@ -34,7 +34,7 @@
   "packageManager": "bun@1.4.2",
   "trustedDependencies": [],
   "devDependencies": {
-    "@biomejs/biome": "2.5.14",
+    "@biomejs/biome": "2.5.15",
     "@opencode-ai/plugin": "1.18.34",
     "@opencode-ai/sdk": "1.18.29",
     "@opencode/client": "2.0.10",
