@@ -12,9 +12,10 @@ pub const VERSION_LIST_MAX_OFFSET: u64 = 9_007_199_254_740_891;
 pub const VERSION_LIST_MAX_NEXT_OFFSET: u64 = 9_007_199_254_740_991;
 
 pub(crate) fn mcp_timestamp(timestamp: DateTime<Utc>) -> DateTime<Utc> {
+    let microsecond_nanos = timestamp.timestamp_subsec_nanos() / 1_000 * 1_000;
     timestamp
-        .with_nanosecond(0)
-        .expect("zero nanoseconds should be a valid UTC timestamp")
+        .with_nanosecond(microsecond_nanos)
+        .expect("microsecond-aligned nanoseconds should be a valid UTC timestamp")
 }
 
 #[derive(Clone, Debug, Deserialize, PartialEq)]

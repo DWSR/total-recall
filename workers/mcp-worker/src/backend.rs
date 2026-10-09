@@ -24,8 +24,8 @@ const EXACT_MEMORY_SQL: &str = r#"SELECT
     memory.type AS memory_type,
     memory.title,
     memory.content,
-    memory.created_at,
-    memory.updated_at,
+    to_char(memory.created_at AT TIME ZONE 'UTC', 'YYYY-MM-DD"T"HH24:MI:SS.US+00:00') AS created_at,
+    to_char(memory.updated_at AT TIME ZONE 'UTC', 'YYYY-MM-DD"T"HH24:MI:SS.US+00:00') AS updated_at,
     to_json(memory.concepts) AS concepts,
     to_json(memory.files) AS files,
     to_json(memory.session_ids) AS session_ids,
@@ -39,8 +39,8 @@ const LATEST_MEMORY_SQL: &str = r#"SELECT
     memory.type AS memory_type,
     memory.title,
     memory.content,
-    memory.created_at,
-    memory.updated_at,
+    to_char(memory.created_at AT TIME ZONE 'UTC', 'YYYY-MM-DD"T"HH24:MI:SS.US+00:00') AS created_at,
+    to_char(memory.updated_at AT TIME ZONE 'UTC', 'YYYY-MM-DD"T"HH24:MI:SS.US+00:00') AS updated_at,
     to_json(memory.concepts) AS concepts,
     to_json(memory.files) AS files,
     to_json(memory.session_ids) AS session_ids,
@@ -52,7 +52,7 @@ JOIN public.memories AS memory
 WHERE head.id = $1::text"#;
 const VERSION_LIST_SQL: &str = r#"SELECT
     memory.version::text AS version,
-    memory.updated_at
+    to_char(memory.updated_at AT TIME ZONE 'UTC', 'YYYY-MM-DD"T"HH24:MI:SS.US+00:00') AS updated_at
 FROM public.memories AS memory
 WHERE memory.id = $1::text
 ORDER BY memory.version DESC
@@ -541,7 +541,7 @@ mod tests {
     const SDK_STACKTRACE_SENTINEL: &str = "sdk-stacktrace-secret-sentinel";
     const EXPECTED_VERSION_LIST_SQL: &str = r#"SELECT
     memory.version::text AS version,
-    memory.updated_at
+    to_char(memory.updated_at AT TIME ZONE 'UTC', 'YYYY-MM-DD"T"HH24:MI:SS.US+00:00') AS updated_at
 FROM public.memories AS memory
 WHERE memory.id = $1::text
 ORDER BY memory.version DESC
@@ -946,6 +946,30 @@ LIMIT $3::text::bigint"#;
         let error = result.expect_err("submicrosecond updated_at values must be rejected");
         assert_eq!(error, invalid_version_summary_response());
         assert_opaque(&error, &[ID_SENTINEL, fractional_timestamp]);
+    }
+
+    #[tokio::test]
+    async fn version_pages_preserve_microsecond_precision_from_text_timestamps() {
+        let microsecond_timestamp = "2026-09-20T12:35:56.765432+00:00";
+        let (result, invocations) = list_versions_with_response(
+            version_page_query(0, 101),
+            version_list_response(vec![version_summary_row("7", microsecond_timestamp)]),
+        )
+        .await;
+
+        assert_eq!(invocations, 1);
+        let summaries = result.expect("microsecond version summaries should decode");
+        assert_eq!(summaries.len(), 1);
+        assert_eq!(
+            summaries[0].updated_at,
+            DateTime::parse_from_rfc3339(microsecond_timestamp)
+                .expect("fixture timestamp should be RFC3339")
+                .with_timezone(&Utc)
+        );
+        assert_eq!(
+            summaries[0].updated_at.timestamp_subsec_nanos(),
+            765_432_000
+        );
     }
 
     #[tokio::test]

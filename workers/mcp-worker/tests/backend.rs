@@ -300,7 +300,7 @@ async fn read_only_version_list_adapter_preserves_fractional_times_and_page_cont
     const ID: &str = "fractional-memory";
     const DATABASE: &str = "version-list-database";
     const TIMEOUT: Duration = Duration::from_secs(5);
-    const SQL: &str = "SELECT\n    memory.version::text AS version,\n    memory.updated_at\nFROM public.memories AS memory\nWHERE memory.id = $1::text\nORDER BY memory.version DESC\nOFFSET $2::text::bigint\nLIMIT $3::text::bigint";
+    const SQL: &str = "SELECT\n    memory.version::text AS version,\n    to_char(memory.updated_at AT TIME ZONE 'UTC', 'YYYY-MM-DD\"T\"HH24:MI:SS.US+00:00') AS updated_at\nFROM public.memories AS memory\nWHERE memory.id = $1::text\nORDER BY memory.version DESC\nOFFSET $2::text::bigint\nLIMIT $3::text::bigint";
 
     let pages = vec![
         (
