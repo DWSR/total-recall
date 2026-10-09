@@ -492,6 +492,25 @@ test("falls back to event location when context directory is blank", async () =>
   );
 });
 
+test("normalizes long trailing separators in v2 paths without regex backtracking", async () => {
+  const recording = recordingRuntime();
+  const cleanup = createV2Adapter(
+    context(
+      `/fallback/project${"/".repeat(100_000)}`,
+      finiteSubscription([
+        nativeEvent("session.execution.started", eventData()),
+      ]),
+    ),
+    dependencies(recording.runtime),
+  );
+
+  await settleSubscription();
+  await cleanup();
+
+  const [observation] = observations(recording.submissions);
+  expect(observation?.metadata.projectName).toBe("project");
+});
+
 test("preserves JSON.parse __proto__ keys in accepted native data", async () => {
   const recording = recordingRuntime();
   const cleanup = createV2Adapter(

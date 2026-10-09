@@ -427,6 +427,34 @@ test("falls back to the working-directory basename for a missing project context
   );
 });
 
+test("normalizes long trailing separators in v1 paths without regex backtracking", async () => {
+  const recording = recordingRuntime();
+  const hooks = createV1Adapter(
+    {
+      ...input,
+      directory: `/fallback/project${"/".repeat(100_000)}`,
+      worktree: "",
+      project: { ...input.project, worktree: "" },
+    },
+    {
+      runtime: recording.runtime,
+      report: () => undefined,
+      now: () => new Date(CLOCK_MS),
+    },
+  );
+
+  await hooks.event({
+    event: {
+      type: "session.idle",
+      properties: { sessionID: "long-path-session" },
+    },
+  });
+
+  const [observation] = recording.submissions;
+  expect(observation?.kind).toBe("observation");
+  expect(observation?.metadata.projectName).toBe("project");
+});
+
 test("rejects an event when no usable directory remains after fallback", async () => {
   const recording = recordingRuntime();
   const diagnostics: Diagnostic[] = [];
