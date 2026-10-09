@@ -193,7 +193,7 @@ fn assert_capture_contract(
                         &format!("pi.{expected_event}"),
                     )
                     && value_is_string_at(&capture.payload, "/data/source", "pi")
-                    && value_is_string_at(&capture.payload, "/data/version", "0.86.1")
+                    && value_is_string_at(&capture.payload, "/data/version", "1.0.0")
                     && value_is_string_at(&capture.payload, "/data/event", expected_event)
             }),
         "observation captures must retain the expected Pi native event identities"

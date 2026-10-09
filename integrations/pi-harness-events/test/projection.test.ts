@@ -39,7 +39,7 @@ function envelope(
   event: NativeObservationEnvelope["event"],
   payload: NativeObservationEnvelope["payload"],
 ): NativeObservationEnvelope {
-  return { source: "pi", version: "0.86.1", event, payload };
+  return { source: "pi", version: "1.0.0", event, payload };
 }
 
 function assertNoProhibitedContent(value: unknown): void {

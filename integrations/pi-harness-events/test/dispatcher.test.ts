@@ -243,7 +243,7 @@ test("spawns an observation with exact arguments and one closed JSON object", as
   assert.deepEqual(invocation.input.endCalls, [
     JSON.stringify({
       source: "pi",
-      version: "0.86.1",
+      version: "1.0.0",
       event: "tool_execution_end",
       payload: data,
     }),

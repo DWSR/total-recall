@@ -19,7 +19,7 @@ use crate::{
 };
 
 const NODE_MAJOR: &str = "24";
-const PI_VERSION: &str = "0.86.1";
+const PI_VERSION: &str = "1.0.0";
 const III_VERSION: &str = "0.24.0";
 const PI_PACKAGE_NAME: &str = "@earendil-works/pi-coding-agent";
 const SCRIPTED_PROVIDER_NAME: &str = "scripted-provider.ts";
@@ -280,7 +280,7 @@ async fn verify_pi_version(artifacts: &ArtifactPaths) -> Result<(), PiScenarioEr
         .arg("--version")
         .env_clear()
         .stdin(Stdio::null());
-    if is_pi_086_1(&run_probe_command(&mut command).await?) {
+    if is_pi_1_0_0(&run_probe_command(&mut command).await?) {
         Ok(())
     } else {
         Err(PiScenarioError::UnsupportedPiVersion)
@@ -354,7 +354,7 @@ fn is_node_24(version: &OsStr) -> bool {
         == Some(NODE_MAJOR)
 }
 
-fn is_pi_086_1(version: &OsStr) -> bool {
+fn is_pi_1_0_0(version: &OsStr) -> bool {
     version
         .to_str()
         .is_some_and(|version| version.trim() == PI_VERSION)
@@ -637,7 +637,7 @@ mod tests {
 
     use super::{
         IsolatedRoots, PiScenarioError, assert_expected_activity, headless_arguments,
-        is_harness_events_help, is_node_24, is_pi_086_1, parse_jsonl, resolve_artifacts,
+        is_harness_events_help, is_node_24, is_pi_1_0_0, parse_jsonl, resolve_artifacts,
         scenario_environment,
     };
 
@@ -742,8 +742,8 @@ mod tests {
     fn recognizes_the_pinned_runtime_versions() {
         assert!(is_node_24(OsStr::new("v24.12.0")));
         assert!(!is_node_24(OsStr::new("v26.0.0")));
-        assert!(is_pi_086_1(OsStr::new("0.86.1")));
-        assert!(!is_pi_086_1(OsStr::new("0.86.2")));
+        assert!(is_pi_1_0_0(OsStr::new("1.0.0")));
+        assert!(!is_pi_1_0_0(OsStr::new("1.0.1")));
     }
 
     #[test]
@@ -868,7 +868,7 @@ mod tests {
         );
         fs::write(
             pi_root.join("package.json"),
-            r#"{"name":"@earendil-works/pi-coding-agent","version":"0.86.1"}"#,
+            r#"{"name":"@earendil-works/pi-coding-agent","version":"1.0.0"}"#,
         )
         .expect("write Pi manifest");
         let extension_root = roots.path("staged/node_modules/@dwsr/pi-harness-events");
