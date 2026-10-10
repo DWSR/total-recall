@@ -30,6 +30,7 @@ pub enum Operation {
     GetLatest,
     GetExact,
     ListVersions,
+    ListRecentContext,
 }
 
 impl Operation {
@@ -41,6 +42,7 @@ impl Operation {
             Self::GetLatest => "get_latest",
             Self::GetExact => "get_exact",
             Self::ListVersions => "list_versions",
+            Self::ListRecentContext => "list_recent_context",
         }
     }
 }

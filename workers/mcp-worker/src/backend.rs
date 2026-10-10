@@ -517,6 +517,7 @@ fn response_field(operation: Operation) -> BackendResponseField {
         Operation::SearchLexical | Operation::SearchVector => BackendResponseField::SearchResult,
         Operation::GetLatest | Operation::GetExact => BackendResponseField::Memory,
         Operation::ListVersions => BackendResponseField::VersionSummary,
+        Operation::ListRecentContext => BackendResponseField::Memory,
     }
 }
 

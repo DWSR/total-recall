@@ -44,7 +44,7 @@
   - _Depends: 1.3_
   - _Requirements: 1.3, 2.1, 2.2, 2.3, 2.4, 2.8, 3.1, 3.2, 3.3, 3.6, 8.9, 8.11_
   - _Boundary: MCP Context Service_
-- [ ] 2.2 Implement exact context-result assembly
+- [x] 2.2 Implement exact context-result assembly
   - Adapt the focused domain read into one `memory_context` operation and map invalid, backend, and malformed outcomes to fixed errors.
   - Build the complete ordered compact-JSON prefix, stop at the first oversized or non-fitting candidate, and return no partial records or retry.
   - Completion is observable when service tests prove omitted, default, and explicit limits, empty results, first and later overflow, exact fields and bytes, one operation, and content-safe failures.

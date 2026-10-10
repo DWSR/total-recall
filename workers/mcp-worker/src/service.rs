@@ -1,20 +1,120 @@
 use std::{collections::BTreeMap, fmt};
 
+use async_trait::async_trait;
 use chrono::{DateTime, Timelike, Utc};
 use memory_store::contracts::{
     Bm25Search, MemoryId, MemorySearchResult, MemoryVersion, MemoryVersionInput, VectorSearch,
 };
+use memory_store::contracts::{ContextCandidate, ContextQuery, MemoryStoreError};
+use memory_store::{MemoryContextDatabase, MemoryContextStore};
 use uuid::Uuid;
 
 use crate::{
     contracts::{
-        GetExactInput, GetLatestInput, ListVersionsInput, MemoryDto, MemoryResults,
-        MemorySearchInput, MemoryVersionDto, MemoryVersions, SEARCH_LIMIT_MAX, SaveInput,
-        VERSION_LIST_DEFAULT_LIMIT, VERSION_LIST_MAX_LIMIT, VERSION_LIST_MAX_OFFSET,
+        ContextMemoryDto, GetExactInput, GetLatestInput, ListVersionsInput, MemoryContextInput,
+        MemoryContextOutput, MemoryDto, MemoryResults, MemorySearchInput, MemoryVersionDto,
+        MemoryVersions, SEARCH_LIMIT_MAX, SaveInput, VERSION_LIST_DEFAULT_LIMIT,
+        VERSION_LIST_MAX_LIMIT, VERSION_LIST_MAX_OFFSET,
     },
     embedding::{QueryEmbeddingError, QueryEmbeddingGenerator},
-    operations::{MemoryOperations, OperationError, OperationInputField, VersionPageQuery},
+    operations::{
+        BackendResponseField, BackendSource, MemoryOperations, Operation, OperationError,
+        OperationInputField, VersionPageQuery,
+    },
 };
+
+#[async_trait]
+pub trait StartupContextOperations: Send + Sync {
+    async fn list_recent(
+        &self,
+        query: ContextQuery,
+    ) -> Result<Vec<ContextCandidate>, OperationError>;
+}
+
+#[async_trait]
+impl<D: MemoryContextDatabase> StartupContextOperations for MemoryContextStore<D> {
+    async fn list_recent(
+        &self,
+        query: ContextQuery,
+    ) -> Result<Vec<ContextCandidate>, OperationError> {
+        self.list_recent(query).await.map_err(|error| match error {
+            MemoryStoreError::InvalidInput(_) => OperationError::invalid_input(
+                Operation::ListRecentContext,
+                OperationInputField::Limit,
+            ),
+            MemoryStoreError::Database(
+                memory_store::contracts::DatabaseError::DatabaseFailure { .. },
+            ) => OperationError::backend_failure(
+                Operation::ListRecentContext,
+                BackendSource::MemoryStore,
+            ),
+            MemoryStoreError::Database(_) => OperationError::invalid_backend_response(
+                Operation::ListRecentContext,
+                BackendResponseField::Memory,
+            ),
+        })
+    }
+}
+
+pub struct StartupContextService<O: StartupContextOperations> {
+    operations: O,
+    settings: crate::config::ContextSettings,
+}
+
+impl<O: StartupContextOperations> StartupContextService<O> {
+    pub fn new(operations: O, settings: crate::config::ContextSettings) -> Self {
+        Self {
+            operations,
+            settings,
+        }
+    }
+
+    pub async fn context(
+        &self,
+        input: MemoryContextInput,
+    ) -> Result<MemoryContextOutput, ToolError> {
+        let limit = input.limit.unwrap_or(self.settings.default_limit());
+        if limit == 0
+            || limit > self.settings.max_limit()
+            || limit > crate::contracts::CONTEXT_SCHEMA_LIMIT_MAX
+        {
+            return Err(ToolError::InvalidInput {
+                field: OperationInputField::Limit,
+            });
+        }
+        let query = ContextQuery {
+            limit,
+            max_candidate_bytes: self.settings.max_result_bytes(),
+        };
+        let candidates = self
+            .operations
+            .list_recent(query)
+            .await
+            .map_err(ToolError::from)?;
+        let mut memories = Vec::new();
+        for candidate in candidates.into_iter().take(limit as usize) {
+            let dto = match candidate {
+                ContextCandidate::Oversized => break,
+                ContextCandidate::Memory(memory) => ContextMemoryDto {
+                    memory_type: memory.memory_type,
+                    title: memory.title,
+                    content: memory.content,
+                    concepts: memory.concepts,
+                },
+            };
+            memories.push(dto);
+            let output = MemoryContextOutput {
+                memories: memories.clone(),
+            };
+            let serialized = serde_json::to_vec(&output).map_err(|_| ToolError::InternalFailure)?;
+            if serialized.len() > self.settings.max_result_bytes() {
+                memories.pop();
+                break;
+            }
+        }
+        Ok(MemoryContextOutput { memories })
+    }
+}
 
 pub trait CreateContext: Send + Sync {
     fn new_id(&self) -> String;
