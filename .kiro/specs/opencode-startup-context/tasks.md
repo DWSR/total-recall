@@ -27,7 +27,7 @@
   - _Depends: 1.1, 1.3_
   - _Requirements: 1.1, 1.2, 1.4, 1.5, 2.1, 2.2, 2.5, 2.6, 2.7, 3.5, 8.4, 8.9, 8.10, 8.11_
   - _Boundary: Memory Context Store_
-- [ ] 1.5 Verify migrations and context ordering on PostgreSQL 17 and 18
+- [x] 1.5 Verify migrations and context ordering on PostgreSQL 17 and 18
   - Apply the baseline, transactional recency change, and standalone concurrent index in their required modes with a simulated writer maintenance window.
   - Exercise greater-version trigger advancement, historical timestamps, deterministic ties, limits, empty state, oversized candidates, context-reader access, and invalid-index recovery.
   - Require the populated bounded read to use the recency index without asserting an entire planner shape.

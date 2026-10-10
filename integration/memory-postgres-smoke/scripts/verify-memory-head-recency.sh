@@ -1,7 +1,7 @@
 #!/usr/bin/env bash
 set -euo pipefail
 
-for variable in MEMORY_POSTGRES_BIN MEMORY_POSTGRES_SOCKET_DIR MEMORY_POSTGRES_DATABASE MEMORY_POSTGRES_MIGRATION_ROLE MEMORY_POSTGRES_APPLICATION_ROLE MEMORY_POSTGRES_EXPECTED_MAJOR MEMORY_SCHEMA_MIGRATION MEMORY_RECENCY_MIGRATION MEMORY_RECENCY_INDEX_MIGRATION PGPORT; do
+for variable in MEMORY_POSTGRES_BIN MEMORY_POSTGRES_SOCKET_DIR MEMORY_POSTGRES_DATABASE MEMORY_POSTGRES_MIGRATION_ROLE MEMORY_POSTGRES_APPLICATION_ROLE MEMORY_POSTGRES_EXPECTED_MAJOR MEMORY_SCHEMA_MIGRATION MEMORY_RECENCY_MIGRATION MEMORY_RECENCY_INDEX_MIGRATION MEMORY_CONTEXT_ADAPTER_SOURCE PGPORT; do
 	if [[ -z "${!variable:-}" ]]; then
 		printf 'missing fixture environment variable: %s\n' "$variable" >&2
 		exit 64
@@ -19,6 +19,20 @@ query() {
 		--username="$1" --dbname="$db" --set=ON_ERROR_STOP=1 --tuples-only --no-align --quiet --command="$2"
 }
 expect() { [[ "$1" == "$2" ]] || fail "$3 (expected '$2', found '$1')"; }
+expect_contains() { [[ "$1" == *"$2"* ]] || fail "$3 (expected output to contain '$2')"; }
+context_sql() {
+	local count="$1" bytes="$2"
+	[[ "$count" =~ ^[1-9][0-9]*$ && "$bytes" =~ ^[1-9][0-9]*$ ]] || fail 'invalid fixture context SQL parameters'
+	perl -0777 -e '
+		local $/; my $s = <>;
+		$s =~ /const SEARCH_CONTEXT_SQL: &str = r#"(.*?)"#;/s or die "SEARCH_CONTEXT_SQL source not found\n";
+		my $sql = $1;
+		$sql =~ s/\$1::text::bigint/'"$count"'/g;
+		$sql =~ s/\$2::text::numeric/'"$bytes"'/g;
+		print $sql;
+	' "$MEMORY_CONTEXT_ADAPTER_SOURCE"
+}
+context_query() { query "$application_role" "$(context_sql "$1" "$2")"; }
 
 "$psql" --no-psqlrc --no-password --host="$MEMORY_POSTGRES_SOCKET_DIR" --port="$PGPORT" \
 	--username="$migration_role" --dbname="$db" --set=ON_ERROR_STOP=1 --single-transaction \
@@ -99,4 +113,26 @@ expect "$(query "$migration_role" "SELECT indisvalid||'|'||pg_get_indexdef(index
 	'true|CREATE INDEX memory_search_heads_context_recency_idx ON public.memory_search_heads USING btree (updated_at DESC, id COLLATE "C", version DESC)' 'ordered concurrent index is valid'
 expect "$(query "$application_role" "SELECT version FROM public.memory_search_heads WHERE id='recency-d'")" '1' 'writer remains available after concurrent index build'
 
-printf 'PostgreSQL %s memory head recency migration=atomic backfill=exact-head privileges=preserved old-reader=compatible lock-timeout=rollback statement-timeout=rollback concurrent-index=recovered writers=available\n' "$MEMORY_POSTGRES_EXPECTED_MAJOR"
+# Execute the exact SEARCH_CONTEXT_SQL source consumed by the production adapter.
+# Only its two static positional parameters are replaced, with fixture-validated
+# positive decimal literals; psql executes the resulting production query.
+expect "$(query "$application_role" "SELECT has_table_privilege(current_user,'public.memories','SELECT')||'|'||has_table_privilege(current_user,'public.memory_search_heads','SELECT')")" \
+	'true|true' 'context reader can read canonical memories and heads'
+query "$application_role" "INSERT INTO public.memories (id,version,type,title,content,created_at,updated_at,concepts,files,session_ids,source_observation_ids) VALUES
+	('tie-z',1,'fact','z1','tie z',TIMESTAMPTZ '2026-01-14 00:00:00+00',TIMESTAMPTZ '2026-01-15 00:00:00+00',ARRAY[]::text[],ARRAY[]::text[],ARRAY[]::text[],ARRAY[]::text[]),
+	('tie-a',1,'fact','a1','tie a',TIMESTAMPTZ '2026-01-14 00:00:00+00',TIMESTAMPTZ '2026-01-15 00:00:00+00',ARRAY[]::text[],ARRAY[]::text[],ARRAY[]::text[],ARRAY[]::text[])" >/dev/null
+expect "$(context_query 2 1000 | wc -l | tr -d ' ')" '2' 'production context query returns exact requested row count'
+expect "$(context_query 2 1000 | awk -F'|' 'NR==1 {line1=$0} NR==2 {line2=$0} NR==1 && $1=="f" && $2=="fact" && $3=="a1" && $4=="tie a" && $5=="[]" {first=1} NR==2 && $1=="f" && $2=="fact" && $3=="z1" && $4=="tie z" && $5=="[]" {second=1} END {if (NR==2 && first && second) print "complete ordered records"; else print "invalid records: " line1 " / " line2}')" \
+	'complete ordered records' 'production context query returns complete narrow fields in deterministic tie order'
+sentinel="$(context_query 2 1)"
+[[ "$sentinel" =~ ^t\|\|\|\|\|[1-9][0-9]*$ ]] || fail "production query oversized sentinel did not withhold all record fields (found '$sentinel')"
+expect "$(context_query 2 1 | wc -l | tr -d ' ')" '1' 'oversized sentinel terminates the returned candidate prefix'
+empty_rows="$(query "$migration_role" "BEGIN; TRUNCATE public.memories CASCADE; $(context_sql 2 1000); ROLLBACK")"
+expect "$(printf '%s' "$empty_rows" | wc -l | tr -d ' ')" '0' 'empty production context query returns no rows'
+
+# Force only the scan method choice so the assertion is about index availability,
+# not the planner's surrounding join or sort shape.
+expect_contains "$(query "$application_role" "SET enable_seqscan=off; EXPLAIN (COSTS OFF) $(context_sql 2 1000)")" \
+	'memory_search_heads_context_recency_idx' 'populated production bounded context query has recency index available'
+
+printf 'PostgreSQL %s memory head recency migration=atomic backfill=exact-head privileges=preserved old-reader=compatible lock-timeout=rollback statement-timeout=rollback concurrent-index=recovered writers=available context-order=verified context-index=available\n' "$MEMORY_POSTGRES_EXPECTED_MAJOR"
