@@ -13,6 +13,8 @@
 // biome-ignore-all lint/style/useExplicitLengthCheck: Empty buffers are explicit protocol states.
 // biome-ignore-all lint/suspicious/noUnnecessaryConditions: Stream EOF is a runtime state transition.
 // biome-ignore-all lint/style/noIncrementDecrement: Sequence numbers are monotonic protocol identifiers.
+// biome-ignore-all lint/style/noTernary: Context mode and fallback values are compact protocol guards.
+// biome-ignore-all lint/complexity/useSimplifiedLogicExpression: Exact result-shape checks are intentionally explicit.
 import type {
   EnabledContextSettings,
   ResolvedContextConfig,
@@ -247,8 +249,9 @@ async function requestReadiness(options: {
   isActive: () => boolean;
   id: string;
   method: string;
+  onProtocolFailure: () => void;
 }): Promise<RpcResponse> {
-  const { child, reader, isActive, id, method } = options;
+  const { child, reader, isActive, id, method, onProtocolFailure } = options;
   const request = {
     jsonrpc: "2.0",
     id,
@@ -271,6 +274,9 @@ async function requestReadiness(options: {
     response.id !== id ||
     response.error !== undefined
   ) {
+    onProtocolFailure();
+    // A complete but invalid JSON-RPC readiness exchange is a permanent
+    // protocol incompatibility, unlike a pipe/read failure.
     throw new Error("invalid readiness response");
   }
   return response;
@@ -286,6 +292,10 @@ export function createContextClient(
   let stderrDrain: Promise<void> | undefined;
   let frameReader: FrameReader | undefined;
   let generation = 0;
+  let generationsStarted = 0;
+  let permanentFailure = false;
+  let generationFailed = false;
+  let startupReady = false;
   let sequence = 0;
   let writeChain: Promise<void> = Promise.resolve();
   const pending = new Map<
@@ -301,7 +311,19 @@ export function createContextClient(
       ) => void;
     }
   >();
+  const retired = new Map<number, Set<string>>();
   let pump: Promise<void> | undefined;
+
+  function failGeneration(): void {
+    if (generationFailed) return;
+    generationFailed = true;
+    if (startupReady) startup = undefined;
+    pump = undefined;
+    writeChain = Promise.resolve();
+    for (const waiter of pending.values()) waiter.resolve(FAILURE);
+    pending.clear();
+    child?.kill("SIGKILL");
+  }
 
   const startEnabled = async (
     settings: EnabledContextSettings,
@@ -317,12 +339,23 @@ export function createContextClient(
       timer = setTimeout(() => resolve(FAILURE), settings.startupTimeoutMs);
     });
     try {
-      child = spawnWorker({
+      generationsStarted += 1;
+      generationFailed = false;
+      startupReady = false;
+      sequence = 0;
+      const currentChild = spawnWorker({
         cmd: [settings.workerPath],
         env: environment,
         stdin: "pipe",
         stdout: "pipe",
         stderr: "pipe",
+      });
+      child = currentChild;
+      let exited = false;
+      const exit = currentChild.exited.then(() => {
+        exited = true;
+        if (!generationFailed && child === currentChild) failGeneration();
+        return FAILURE;
       });
       if (Date.now() >= startupDeadline) {
         child.kill("SIGKILL");
@@ -331,46 +364,58 @@ export function createContextClient(
       stderrDrain = drain(child.stderr);
       reader = child.stdout.getReader();
       generation += 1;
-      frameReader = new FrameReader(reader, settings.maxFrameBytes);
+      const currentReader = new FrameReader(reader, settings.maxFrameBytes);
+      frameReader = currentReader;
       readiness = (async () => {
         if (!active) {
           throw new Error("startup is no longer active");
         }
         const discovery = await requestReadiness({
-          child: child as WorkerProcess,
-          reader: frameReader as FrameReader,
+          child: currentChild,
+          reader: currentReader,
           isActive: () => active,
           id: "startup-discover",
           method: "server/discover",
+          onProtocolFailure: () => {
+            permanentFailure = true;
+          },
         });
         if (!validDiscovery(discovery.result)) {
+          permanentFailure = true;
           throw new Error("invalid server discovery");
         }
         if (!active) {
           throw new Error("startup is no longer active");
         }
         const listing = await requestReadiness({
-          child: child as WorkerProcess,
-          reader: frameReader as FrameReader,
+          child: currentChild,
+          reader: currentReader,
           isActive: () => active,
           id: "startup-tools",
           method: "tools/list",
+          onProtocolFailure: () => {
+            permanentFailure = true;
+          },
         });
         if (!validToolList(listing.result)) {
+          permanentFailure = true;
           throw new Error("invalid tool schema");
         }
         readerReleased = true;
         return { kind: "ready" } as const;
       })();
-      const outcome = await Promise.race([readiness, deadline]);
+      const outcome = await Promise.race([readiness, deadline, exit]);
       if (outcome.kind === "failure") {
         active = false;
-        child.kill("SIGKILL");
+        generationFailed = true;
+        if (!exited) currentChild.kill("SIGKILL");
         return FAILURE;
       }
+      startupReady = true;
       return outcome;
     } catch {
       active = false;
+      generationFailed = true;
       child?.kill("SIGKILL");
       return FAILURE;
     } finally {
@@ -399,7 +444,13 @@ export function createContextClient(
         return startup;
       }
       if (config.mode === "enabled") {
-        startup = startEnabled(config.settings, { ...config.childEnvironment });
+        startup = startEnabled(config.settings, {
+          ...config.childEnvironment,
+        }).then((result) => {
+          if (result.kind === "failure" && permanentFailure) return result;
+          if (result.kind === "failure") startup = undefined;
+          return result;
+        });
       } else {
         startup = Promise.resolve(FAILURE);
       }
@@ -412,6 +463,9 @@ export function createContextClient(
         }
       | typeof FAILURE
     > {
+      const lookupTimeout =
+        config.mode === "enabled" ? config.settings.lookupTimeoutMs : 0;
+      const deadline = Date.now() + lookupTimeout;
       if (
         config.mode !== "enabled" ||
         !Number.isSafeInteger(limit) ||
@@ -419,8 +473,14 @@ export function createContextClient(
         limit > config.settings.limit
       )
         return FAILURE;
+      if (permanentFailure || (generationsStarted >= 2 && generationFailed))
+        return FAILURE;
       if (await this.start().then((result) => result.kind !== "ready"))
         return FAILURE;
+      if (Date.now() >= deadline) {
+        failGeneration();
+        return FAILURE;
+      }
       if (
         pending.size >= config.settings.maxPending ||
         frameReader === undefined ||
@@ -442,18 +502,27 @@ export function createContextClient(
           }
         | typeof FAILURE
       >((resolve) => pending.set(id, { resolve }));
+      const requestChild = child;
+      const requestGeneration = generation;
+      const requestReader = frameReader;
       writeChain = writeChain.then(async () => {
-        await child?.stdin.write(`${message}\n`);
+        if (generationFailed || generation !== requestGeneration)
+          throw new Error("worker generation failed");
+        await requestChild.stdin.write(`${message}\n`);
       });
-      writeChain.catch(() => {
-        for (const waiter of pending.values()) waiter.resolve(FAILURE);
-        pending.clear();
-      });
+      writeChain.catch(() => failGeneration());
       if (pump === undefined) {
-        pump = (async () => {
+        let generationPump!: Promise<void>;
+        generationPump = (async () => {
           try {
             while (pending.size > 0) {
-              const response = await (frameReader as FrameReader).next();
+              const response = await requestReader.next();
+              if (generation !== requestGeneration) return;
+              const retiredIds = retired.get(requestGeneration);
+              if (retiredIds?.has(response.id as string)) {
+                retiredIds.delete(response.id as string);
+                continue;
+              }
               if (
                 response.jsonrpc !== "2.0" ||
                 typeof response.id !== "string" ||
@@ -474,29 +543,49 @@ export function createContextClient(
                 !Array.isArray(resultValue) &&
                 Object.keys(resultValue).length === 1 &&
                 Object.hasOwn(resultValue, "memories");
-              if (
-                response.error !== undefined ||
-                !exactResult ||
-                !Array.isArray(memories) ||
+              if (response.error !== undefined) waiter.resolve(FAILURE);
+              else if (
+                !(exactResult && Array.isArray(memories)) ||
                 !memories.every((item) => validMemory(item))
-              )
+              ) {
                 waiter.resolve(FAILURE);
-              else
+                failGeneration();
+              } else
                 waiter.resolve({
                   kind: "context",
                   memories: memories as ContextMemory[],
                 });
             }
           } catch {
-            for (const waiter of pending.values()) waiter.resolve(FAILURE);
-            pending.clear();
-            child?.kill("SIGKILL");
+            failGeneration();
           } finally {
-            pump = undefined;
+            if (pump === generationPump) pump = undefined;
           }
         })();
+        pump = generationPump;
       }
-      return responsePromise;
+      let timer: ReturnType<typeof setTimeout> | undefined;
+      const timeout = new Promise<typeof FAILURE>((resolve) => {
+        timer = setTimeout(
+          () => {
+            if (pending.has(id)) {
+              let retiredIds = retired.get(requestGeneration);
+              if (retiredIds === undefined) {
+                retiredIds = new Set();
+                retired.set(requestGeneration, retiredIds);
+              }
+              retiredIds.add(id);
+              pending.delete(id);
+              resolve(FAILURE);
+              failGeneration();
+            }
+          },
+          Math.max(0, deadline - Date.now()),
+        );
+      });
+      return Promise.race([responsePromise, timeout]).finally(() => {
+        if (timer !== undefined) clearTimeout(timer);
+      });
     },
     /** Internal observability for lifecycle composition and focused readiness tests. */
     get process(): WorkerProcess | undefined {

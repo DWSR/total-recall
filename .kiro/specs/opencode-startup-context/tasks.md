@@ -87,7 +87,7 @@
   - _Depends: 3.2, 3.3_
   - _Requirements: 2.1, 2.2, 4.3, 4.7, 8.3, 8.6, 8.7, 8.9, 8.10, 8.11_
   - _Boundary: MCP Client_
-- [ ] 3.5 Enforce lookup deadlines and bounded replacement
+- [x] 3.5 Enforce lookup deadlines and bounded replacement
   - Issue strict context calls under one host deadline, retire timed-out IDs, close failed generations, and apply no late data.
   - Distinguish restart-eligible from permanent failures, permit at most one later replacement generation, and settle every pending request on exit.
   - Completion is observable when tests cover backend errors, timeout races, unexpected exit, restart budget, permanent mismatches, and later-session recovery.

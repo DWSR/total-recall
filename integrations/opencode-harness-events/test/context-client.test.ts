@@ -5,6 +5,8 @@
 // biome-ignore-all lint/style/useBlockStatements: Test preconditions use concise failure guards.
 // biome-ignore-all lint/performance/noAwaitInLoops: Protocol scenarios are tested deterministically in sequence.
 // biome-ignore-all lint/complexity/noExcessiveCognitiveComplexity: The fake worker models multiple protocol paths.
+// biome-ignore-all lint/complexity/useLiteralKeys: The fixture dynamically converts RPC success into an error.
+// biome-ignore-all lint/performance/noDelete: The fixture removes mutually exclusive JSON-RPC response fields.
 import { expect, test } from "bun:test";
 // biome-ignore lint/correctness/useImportExtensions: Bun and TypeScript resolve package source imports extensionlessly.
 import { createContextClient } from "../src/context-client";
@@ -16,6 +18,7 @@ const config = fromValues({
   TOTAL_RECALL_MEMORY_DATABASE: "memory-db",
 });
 const SPAWN_DELAY_OVER_DEADLINE_MS = 20;
+const REPLACEMENT_LOOKUP_TIMEOUT_MS = 1000;
 const CONTEXT_FRAME_TEST_CONTENT_BYTES = 34_000;
 const QUEUED_PARTIAL_BOUNDARY_CONTENT_BYTES = 65_420;
 
@@ -75,7 +78,9 @@ function mockWorker(options: {
   readonly inputSchema?: unknown;
   readonly schema?: unknown;
   readonly holdResponses?: boolean;
+  readonly backendError?: boolean;
   readonly holdReadiness?: boolean;
+  readonly readinessRpcError?: boolean;
   readonly blockFirstWrite?: boolean;
   readonly failSpawn?: boolean;
   readonly onSpawn?: () => void;
@@ -97,6 +102,7 @@ function mockWorker(options: {
   let queuedOutput = "";
   let firstCallFrame = "";
   let resolveFirstWrite: (() => void) | undefined;
+  let resolveExit: ((code: number) => void) | undefined;
   const child = {
     stdin: {
       write: (text: string): void | Promise<void> => {
@@ -152,7 +158,20 @@ function mockWorker(options: {
             ],
           };
         }
-        let frame = `${JSON.stringify({ jsonrpc: "2.0", id: request.id, result })}\n`;
+        const rpcResponse = {
+          jsonrpc: "2.0",
+          id: request.id,
+          result,
+        } as Record<string, unknown>;
+        if (options.readinessRpcError && method !== "tools/call") {
+          delete rpcResponse["result"];
+          rpcResponse["error"] = { code: -1, message: "private" };
+        }
+        if (options.backendError && method === "tools/call") {
+          delete rpcResponse["result"];
+          rpcResponse["error"] = { code: -1, message: "private" };
+        }
+        let frame = `${JSON.stringify(rpcResponse)}\n`;
         if (options.responseMode === "unknown-id" && method === "tools/call")
           frame = `${JSON.stringify({ jsonrpc: "2.0", id: "unknown-live-id", result })}\n`;
         if (options.responseMode === "malformed" && method === "tools/call")
@@ -225,7 +244,9 @@ function mockWorker(options: {
       },
       { highWaterMark: 0 },
     ),
-    exited: Promise.resolve(0),
+    exited: new Promise<number>((resolve) => {
+      resolveExit = resolve;
+    }),
     kill: () => {
       killed = true;
     },
@@ -244,6 +265,29 @@ function mockWorker(options: {
     },
     resolveFirstWrite() {
       resolveFirstWrite?.();
+    },
+    exit() {
+      resolveExit?.(1);
+      try {
+        stdoutController.close();
+      } catch {
+        // An already-closed stream still represents a completed fake exit.
+      }
+    },
+    respond(id: string, content: string) {
+      stdoutController.enqueue(
+        new TextEncoder().encode(
+          `${JSON.stringify({
+            jsonrpc: "2.0",
+            id,
+            result: {
+              memories: [
+                { type: "fact", title: "title", content, concepts: ["one"] },
+              ],
+            },
+          })}\n`,
+        ),
+      );
     },
     spawn: (spawnOptionsValue: unknown) => {
       spawnOptions = spawnOptionsValue;
@@ -318,6 +362,26 @@ test("maps spawn failure and readiness mismatches to fixed startup failure", asy
   );
 });
 
+test("permanent identity and schema mismatches do not consume a replacement", async () => {
+  if (config.mode !== "enabled") throw new Error("expected enabled settings");
+  for (const options of [
+    { serverName: "wrong-server" },
+    { protocolVersion: "wrong-version" },
+    { schema: { type: "object" } },
+    { readinessRpcError: true },
+  ]) {
+    const fake = mockWorker(options);
+    let spawns = 0;
+    const client = createContextClient(config, ((value: never) => {
+      spawns += 1;
+      return fake.spawn(value);
+    }) as never);
+    expect((await client.request(1)).kind).toBe("failure");
+    expect((await client.request(1)).kind).toBe("failure");
+    expect(spawns).toBe(1);
+  }
+});
+
 test("bounds combined readiness by one startup deadline", async () => {
   const shortConfig = fromValues({
     TOTAL_RECALL_CONTEXT_BIN: "/absolute/worker",
@@ -336,6 +400,32 @@ test("bounds combined readiness by one startup deadline", async () => {
   expect(fake.requests).toHaveLength(1);
   expect(fake.killed).toBe(true);
   expect(() => fake.child.stdout.getReader()).toThrow();
+});
+
+test("settles readiness immediately when the child exits", async () => {
+  if (config.mode !== "enabled") throw new Error("expected enabled settings");
+  const fake = mockWorker({ holdReadiness: true });
+  const client = createContextClient(config, fake.spawn as never);
+  const starting = client.start();
+  await new Promise((resolve) => setTimeout(resolve, 0));
+  fake.exit();
+  expect(await starting).toEqual({
+    kind: "failure",
+    category: "context_startup_failed",
+  });
+});
+
+test("settles pending lookups when the child exits", async () => {
+  if (config.mode !== "enabled") throw new Error("expected enabled settings");
+  const fake = mockWorker({ holdResponses: true });
+  const client = createContextClient(config, fake.spawn as never);
+  const request = client.request(1);
+  await new Promise((resolve) => setTimeout(resolve, 0));
+  fake.exit();
+  expect(await request).toEqual({
+    kind: "failure",
+    category: "context_startup_failed",
+  });
 });
 
 test("startup timeout stops a blocked write continuation and retains stdout ownership until it settles", async () => {
@@ -592,4 +682,64 @@ test("bounds pending requests and rejects malformed, unknown-ID, and partial-EOF
     });
     expect(fake.killed).toBe(true);
   }
+});
+
+test("discards a retired response from the prior generation during replacement", async () => {
+  if (config.mode !== "enabled") throw new Error("expected enabled settings");
+  const quickConfig = {
+    ...config,
+    settings: { ...config.settings, lookupTimeoutMs: 20 },
+  };
+  const first = mockWorker({ holdResponses: true });
+  const replacement = mockWorker({ holdResponses: true });
+  let spawns = 0;
+  const client = createContextClient(quickConfig, ((options: never) => {
+    spawns += 1;
+    if (spawns === 1) return first.spawn(options);
+    return replacement.spawn(options);
+  }) as never);
+  expect(await client.request(1)).toEqual({
+    kind: "failure",
+    category: "context_startup_failed",
+  });
+  expect(first.killed).toBe(true);
+  quickConfig.settings.lookupTimeoutMs = REPLACEMENT_LOOKUP_TIMEOUT_MS;
+  const replacementRequest = client.request(1);
+  while (
+    replacement.requests.filter((request) => request.method === "tools/call")
+      .length === 0
+  )
+    await new Promise((resolve) => setTimeout(resolve, 0));
+  const replacementId = replacement.requests.at(-1)?.id;
+  expect(replacementId).toBe("2:1");
+  const pendingReplacement = replacementRequest.then((result) => result);
+  first.respond("1:1", "late prior result");
+  await new Promise((resolve) => setTimeout(resolve, 0));
+  expect(replacementId).toBe("2:1");
+  replacement.respond(replacementId as string, "replacement result");
+  expect(await pendingReplacement).toEqual({
+    kind: "context",
+    memories: [
+      {
+        type: "fact",
+        title: "title",
+        content: "replacement result",
+        concepts: ["one"],
+      },
+    ],
+  });
+  expect(spawns).toBe(2);
+
+  const backend = mockWorker({ backendError: true });
+  const backendClient = createContextClient(config, backend.spawn as never);
+  expect((await backendClient.request(1)).kind).toBe("failure");
+  expect((await backendClient.request(1)).kind).toBe("failure");
+  expect(backend.killed).toBe(false);
+
+  replacement.child.stdin.end();
+  expect(await client.request(1)).toEqual({
+    kind: "failure",
+    category: "context_startup_failed",
+  });
+  expect(spawns).toBe(2);
 });
