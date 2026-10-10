@@ -135,6 +135,7 @@ fn list_tools_returns_the_complete_strict_contract_registry_without_a_cursor() {
             "memory_get_latest",
             "memory_get_exact",
             "memory_list_versions",
+            "memory_context",
         ]
     );
     assert_eq!(

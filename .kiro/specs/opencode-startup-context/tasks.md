@@ -37,7 +37,7 @@
   - _Boundary: Head Recency Projection, Memory Context Store, PostgreSQL Verification_
 
 - [ ] 2. Expose bounded startup context through MCP
-- [ ] 2.1 Add context configuration and the strict tool contract
+- [x] 2.1 Add context configuration and the strict tool contract
   - Validate default and maximum counts, result bytes, operation and database deadlines, and cross-field relationships before stdout ownership.
   - Define the query-free optional count input with explicit-null rejection, the narrow result DTO, and the static schema ceiling while preserving all existing tool schemas.
   - Completion is observable when configuration and contract tests cover defaults, every invalid boundary, no-call rejection, the six-tool registry, and payload-safe startup failures.

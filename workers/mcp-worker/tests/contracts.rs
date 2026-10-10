@@ -1,7 +1,8 @@
 use chrono::{DateTime, Utc};
 use mcp_worker::contracts::{
-    GetExactInput, GetLatestInput, ListVersionsInput, MemoryDto, MemoryResults, MemorySearchInput,
-    MemoryVersionDto, MemoryVersions, SaveInput, tool_registry,
+    ContextMemoryDto, GetExactInput, GetLatestInput, ListVersionsInput, MemoryContextInput,
+    MemoryContextOutput, MemoryDto, MemoryResults, MemorySearchInput, MemoryVersionDto,
+    MemoryVersions, SaveInput, tool_registry,
 };
 use memory_store::contracts::{MemorySearchResult, MemoryVersionInput};
 use serde_json::{Value, json};
@@ -11,8 +12,10 @@ const MAX_JSON_SAFE_INTEGER: u64 = 9_007_199_254_740_991;
 
 #[test]
 fn tool_registry_snapshots_all_strict_contracts() {
+    let registry = serde_json::to_value(tool_registry()).unwrap();
+    assert_eq!(registry.as_array().unwrap().len(), 6);
     assert_eq!(
-        serde_json::to_value(tool_registry()).unwrap(),
+        Value::Array(registry.as_array().unwrap()[..5].to_vec()),
         json!([
             tool(
                 "memory_save",
@@ -102,6 +105,71 @@ fn tool_registry_snapshots_all_strict_contracts() {
             ),
         ]),
     );
+    assert_eq!(
+        registry[5],
+        json!({
+            "name": "memory_context",
+            "inputSchema": object_schema(
+                json!({ "limit": { "type": "integer", "minimum": 1, "maximum": 50 } }),
+                &[],
+            ),
+            "outputSchema": object_schema(
+                json!({ "memories": { "type": "array", "items": context_memory_schema() } }),
+                &["memories"],
+            ),
+        })
+    );
+}
+
+#[test]
+fn memory_context_input_is_optional_strict_and_rejects_explicit_null() {
+    assert_eq!(
+        serde_json::from_value::<MemoryContextInput>(json!({}))
+            .unwrap()
+            .limit,
+        None
+    );
+    assert_eq!(
+        serde_json::from_value::<MemoryContextInput>(json!({"limit": 1}))
+            .unwrap()
+            .limit,
+        Some(1)
+    );
+    for value in [
+        json!({"limit": null}),
+        json!({"limit": 0}),
+        json!({"limit": -1}),
+        json!({"limit": 51}),
+        json!({"limit": "1"}),
+        json!({"limit": 1.5}),
+        json!({"query": "private-query-sentinel"}),
+        json!({"other": true}),
+    ] {
+        assert!(
+            serde_json::from_value::<MemoryContextInput>(value.clone()).is_err(),
+            "accepted {value}"
+        );
+    }
+}
+
+#[test]
+fn context_output_dto_exposes_only_the_four_approved_fields() {
+    let output = serde_json::to_value(MemoryContextOutput {
+        memories: vec![ContextMemoryDto {
+            memory_type: "fact".to_owned(),
+            title: "title".to_owned(),
+            content: "content".to_owned(),
+            concepts: vec!["concept".to_owned()],
+        }],
+    })
+    .unwrap();
+    assert_eq!(
+        output,
+        json!({"memories": [{
+            "type": "fact", "title": "title", "content": "content", "concepts": ["concept"]
+        }]})
+    );
+    assert_eq!(output["memories"][0].as_object().unwrap().len(), 4);
 }
 
 #[test]
@@ -373,6 +441,18 @@ fn memory_version_schema() -> Value {
             "updated_at": { "type": "string", "format": "date-time" },
         }),
         &["version", "updated_at"],
+    )
+}
+
+fn context_memory_schema() -> Value {
+    object_schema(
+        json!({
+            "type": { "type": "string" },
+            "title": { "type": "string" },
+            "content": { "type": "string" },
+            "concepts": { "type": "array", "items": { "type": "string" } },
+        }),
+        &["type", "title", "content", "concepts"],
     )
 }
 

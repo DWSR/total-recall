@@ -5,9 +5,12 @@ use std::{
 
 use iii_sdk::DEFAULT_ENGINE_URL;
 use mcp_worker::config::{
-    Config, ConfigError, III_NAMESPACE_ENV, III_URL_ENV, III_WORKER_NAME_ENV, QueryEmbeddingConfig,
-    QueryEmbeddingSettings, TOTAL_RECALL_EMBEDDING_MODEL_ENV, TOTAL_RECALL_EMBEDDING_PROVIDER_ENV,
-    TOTAL_RECALL_MCP_CHANNEL_CAPACITY_ENV, TOTAL_RECALL_MCP_EMBEDDING_TIMEOUT_MS_ENV,
+    Config, ConfigError, ContextSettings, III_NAMESPACE_ENV, III_URL_ENV, III_WORKER_NAME_ENV,
+    QueryEmbeddingConfig, QueryEmbeddingSettings, TOTAL_RECALL_EMBEDDING_MODEL_ENV,
+    TOTAL_RECALL_EMBEDDING_PROVIDER_ENV, TOTAL_RECALL_MCP_CHANNEL_CAPACITY_ENV,
+    TOTAL_RECALL_MCP_CONTEXT_DATABASE_TIMEOUT_MS_ENV, TOTAL_RECALL_MCP_CONTEXT_DEFAULT_LIMIT_ENV,
+    TOTAL_RECALL_MCP_CONTEXT_MAX_LIMIT_ENV, TOTAL_RECALL_MCP_CONTEXT_MAX_RESULT_BYTES_ENV,
+    TOTAL_RECALL_MCP_CONTEXT_TIMEOUT_MS_ENV, TOTAL_RECALL_MCP_EMBEDDING_TIMEOUT_MS_ENV,
     TOTAL_RECALL_MCP_MAX_IN_FLIGHT_ENV, TOTAL_RECALL_MCP_MAX_LINE_BYTES_ENV,
     TOTAL_RECALL_MEMORY_DATABASE_ENV,
 };
@@ -63,9 +66,129 @@ fn configuration_uses_the_database_target_and_default_resource_bounds() {
     assert_eq!(config.max_line_bytes, 4_194_304);
     assert_eq!(config.channel_capacity, 32);
     assert_eq!(config.max_in_flight, 16);
+    assert_eq!(config.context, ContextSettings::default());
     assert_eq!(config.iii.engine_url, DEFAULT_ENGINE_URL);
     assert_eq!(config.iii.worker_name, None);
     assert_eq!(config.iii.namespace, None);
+}
+
+#[test]
+fn context_configuration_accepts_default_and_inclusive_boundaries() {
+    assert_eq!(
+        serde_json::to_vec(&serde_json::json!({"memories": []}))
+            .unwrap()
+            .len(),
+        15
+    );
+
+    let defaults = Config::from_values(values(Some("total-recall-memory"))).unwrap();
+    assert_eq!(defaults.context.default_limit(), 10);
+    assert_eq!(defaults.context.max_limit(), 20);
+    assert_eq!(defaults.context.max_result_bytes(), 32_768);
+    assert_eq!(defaults.context.timeout_ms(), 5_000);
+    assert_eq!(defaults.context.database_timeout_ms(), 3_000);
+
+    let mut configured = values(Some("total-recall-memory"));
+    configured.extend([
+        (
+            TOTAL_RECALL_MCP_CONTEXT_DEFAULT_LIMIT_ENV.to_owned(),
+            "1".to_owned(),
+        ),
+        (
+            TOTAL_RECALL_MCP_CONTEXT_MAX_LIMIT_ENV.to_owned(),
+            "1".to_owned(),
+        ),
+        (
+            TOTAL_RECALL_MCP_CONTEXT_MAX_RESULT_BYTES_ENV.to_owned(),
+            "15".to_owned(),
+        ),
+        (
+            TOTAL_RECALL_MCP_CONTEXT_TIMEOUT_MS_ENV.to_owned(),
+            "1".to_owned(),
+        ),
+        (
+            TOTAL_RECALL_MCP_CONTEXT_DATABASE_TIMEOUT_MS_ENV.to_owned(),
+            "1".to_owned(),
+        ),
+    ]);
+    let lower = Config::from_values(configured).unwrap();
+    assert_eq!(lower.context.default_limit(), 1);
+    assert_eq!(lower.context.max_limit(), 1);
+    assert_eq!(lower.context.max_result_bytes(), 15);
+    assert_eq!(lower.context.timeout_ms(), 1);
+    assert_eq!(lower.context.database_timeout_ms(), 1);
+
+    let mut upper = values(Some("total-recall-memory"));
+    upper.extend([
+        (
+            TOTAL_RECALL_MCP_CONTEXT_DEFAULT_LIMIT_ENV.to_owned(),
+            "50".to_owned(),
+        ),
+        (
+            TOTAL_RECALL_MCP_CONTEXT_MAX_LIMIT_ENV.to_owned(),
+            "50".to_owned(),
+        ),
+        (
+            TOTAL_RECALL_MCP_CONTEXT_MAX_RESULT_BYTES_ENV.to_owned(),
+            "18446744073709551615".to_owned(),
+        ),
+        (
+            TOTAL_RECALL_MCP_CONTEXT_TIMEOUT_MS_ENV.to_owned(),
+            "30000".to_owned(),
+        ),
+        (
+            TOTAL_RECALL_MCP_CONTEXT_DATABASE_TIMEOUT_MS_ENV.to_owned(),
+            "30000".to_owned(),
+        ),
+    ]);
+    let upper = Config::from_values(upper).unwrap();
+    assert_eq!(upper.context.max_limit(), 50);
+    assert_eq!(upper.context.timeout_ms(), 30_000);
+    assert_eq!(upper.context.database_timeout_ms(), 30_000);
+}
+
+#[test]
+fn context_configuration_rejects_every_invalid_numeric_and_cross_field_boundary() {
+    let invalid_values = ["", "nope", "0", "-1", "1.5", "18446744073709551616"];
+    for variable in [
+        TOTAL_RECALL_MCP_CONTEXT_DEFAULT_LIMIT_ENV,
+        TOTAL_RECALL_MCP_CONTEXT_MAX_LIMIT_ENV,
+        TOTAL_RECALL_MCP_CONTEXT_MAX_RESULT_BYTES_ENV,
+        TOTAL_RECALL_MCP_CONTEXT_TIMEOUT_MS_ENV,
+        TOTAL_RECALL_MCP_CONTEXT_DATABASE_TIMEOUT_MS_ENV,
+    ] {
+        for value in invalid_values {
+            let mut input = values(Some("total-recall-memory"));
+            input.push((variable.to_owned(), value.to_owned()));
+            assert!(Config::from_values(input).is_err(), "{variable}={value:?}");
+        }
+    }
+    for (variable, value) in [
+        (TOTAL_RECALL_MCP_CONTEXT_DEFAULT_LIMIT_ENV, "51"),
+        (TOTAL_RECALL_MCP_CONTEXT_MAX_LIMIT_ENV, "51"),
+        (TOTAL_RECALL_MCP_CONTEXT_MAX_RESULT_BYTES_ENV, "13"),
+        (TOTAL_RECALL_MCP_CONTEXT_TIMEOUT_MS_ENV, "30001"),
+        (TOTAL_RECALL_MCP_CONTEXT_DATABASE_TIMEOUT_MS_ENV, "30001"),
+    ] {
+        let mut input = values(Some("total-recall-memory"));
+        input.push((variable.to_owned(), value.to_owned()));
+        assert!(Config::from_values(input).is_err(), "{variable}={value}");
+    }
+    for overrides in [
+        vec![
+            (TOTAL_RECALL_MCP_CONTEXT_DEFAULT_LIMIT_ENV, "21"),
+            (TOTAL_RECALL_MCP_CONTEXT_MAX_LIMIT_ENV, "20"),
+        ],
+        vec![(TOTAL_RECALL_MCP_CONTEXT_DATABASE_TIMEOUT_MS_ENV, "5001")],
+    ] {
+        let mut input = values(Some("total-recall-memory"));
+        input.extend(
+            overrides
+                .into_iter()
+                .map(|(key, value)| (key.to_owned(), value.to_owned())),
+        );
+        assert!(Config::from_values(input).is_err());
+    }
 }
 
 #[test]
@@ -378,6 +501,44 @@ fn invalid_startup_reports_a_content_safe_error_without_stdout() {
 }
 
 #[test]
+fn invalid_context_startup_values_are_payload_safe_and_fail_before_stdout_ownership() {
+    for (variable, sentinel) in [
+        (
+            TOTAL_RECALL_MCP_CONTEXT_DEFAULT_LIMIT_ENV,
+            "private-default-count",
+        ),
+        (TOTAL_RECALL_MCP_CONTEXT_MAX_LIMIT_ENV, "private-max-count"),
+        (
+            TOTAL_RECALL_MCP_CONTEXT_MAX_RESULT_BYTES_ENV,
+            "private-result-bytes",
+        ),
+        (
+            TOTAL_RECALL_MCP_CONTEXT_TIMEOUT_MS_ENV,
+            "private-operation-timeout",
+        ),
+        (
+            TOTAL_RECALL_MCP_CONTEXT_DATABASE_TIMEOUT_MS_ENV,
+            "private-database-timeout",
+        ),
+    ] {
+        let output = worker_command()
+            .env(TOTAL_RECALL_MEMORY_DATABASE_ENV, "private-memory-target")
+            .env(variable, sentinel)
+            .output()
+            .expect("worker binary should start");
+        let stderr = String::from_utf8_lossy(&output.stderr);
+        assert!(!output.status.success());
+        assert!(output.stdout.is_empty());
+        assert_eq!(
+            stderr,
+            "worker startup configuration failed: startup context configuration is invalid\n"
+        );
+        assert!(!stderr.contains(sentinel));
+        assert!(!stderr.contains("private-memory-target"));
+    }
+}
+
+#[test]
 fn invalid_query_embedding_startup_fails_before_serving_protocol_requests() {
     let mut provider_only = valid_worker_command();
     provider_only.env(TOTAL_RECALL_EMBEDDING_PROVIDER_ENV, PROVIDER_SENTINEL);
@@ -505,5 +666,11 @@ fn worker_command() -> Command {
         .env_remove(TOTAL_RECALL_EMBEDDING_PROVIDER_ENV)
         .env_remove(TOTAL_RECALL_EMBEDDING_MODEL_ENV)
         .env_remove(TOTAL_RECALL_MCP_EMBEDDING_TIMEOUT_MS_ENV);
+    command
+        .env_remove(TOTAL_RECALL_MCP_CONTEXT_DEFAULT_LIMIT_ENV)
+        .env_remove(TOTAL_RECALL_MCP_CONTEXT_MAX_LIMIT_ENV)
+        .env_remove(TOTAL_RECALL_MCP_CONTEXT_MAX_RESULT_BYTES_ENV)
+        .env_remove(TOTAL_RECALL_MCP_CONTEXT_TIMEOUT_MS_ENV)
+        .env_remove(TOTAL_RECALL_MCP_CONTEXT_DATABASE_TIMEOUT_MS_ENV);
     command
 }

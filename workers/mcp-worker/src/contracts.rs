@@ -10,6 +10,7 @@ pub const VERSION_LIST_DEFAULT_LIMIT: u32 = 50;
 pub const VERSION_LIST_MAX_LIMIT: u32 = 100;
 pub const VERSION_LIST_MAX_OFFSET: u64 = 9_007_199_254_740_891;
 pub const VERSION_LIST_MAX_NEXT_OFFSET: u64 = 9_007_199_254_740_991;
+pub const CONTEXT_SCHEMA_LIMIT_MAX: u32 = 50;
 
 pub(crate) fn mcp_timestamp(timestamp: DateTime<Utc>) -> DateTime<Utc> {
     let microsecond_nanos = timestamp.timestamp_subsec_nanos() / 1_000 * 1_000;
@@ -52,6 +53,40 @@ pub struct ListVersionsInput {
     pub id: String,
     pub offset: Option<u64>,
     pub limit: Option<u32>,
+}
+
+#[derive(Clone, Debug, Deserialize, Eq, PartialEq)]
+#[serde(deny_unknown_fields)]
+pub struct MemoryContextInput {
+    #[serde(default, deserialize_with = "deserialize_present_non_null_u32")]
+    pub limit: Option<u32>,
+}
+
+fn deserialize_present_non_null_u32<'de, D>(deserializer: D) -> Result<Option<u32>, D::Error>
+where
+    D: serde::Deserializer<'de>,
+{
+    let value = u32::deserialize(deserializer)?;
+    if !(1..=CONTEXT_SCHEMA_LIMIT_MAX).contains(&value) {
+        return Err(serde::de::Error::custom(
+            "limit is outside the supported range",
+        ));
+    }
+    Ok(Some(value))
+}
+
+#[derive(Clone, Debug, Eq, PartialEq, Serialize)]
+pub struct MemoryContextOutput {
+    pub memories: Vec<ContextMemoryDto>,
+}
+
+#[derive(Clone, Debug, Eq, PartialEq, Serialize)]
+pub struct ContextMemoryDto {
+    #[serde(rename = "type")]
+    pub memory_type: String,
+    pub title: String,
+    pub content: String,
+    pub concepts: Vec<String>,
 }
 
 #[derive(Clone, Debug, PartialEq, Serialize)]
@@ -225,6 +260,23 @@ pub fn tool_registry() -> Vec<Tool> {
                 &["versions", "next_offset"],
             ),
         ),
+        tool(
+            "memory_context",
+            object_schema(
+                json!({
+                    "limit": {
+                        "type": "integer",
+                        "minimum": 1,
+                        "maximum": CONTEXT_SCHEMA_LIMIT_MAX,
+                    },
+                }),
+                &[],
+            ),
+            object_schema(
+                json!({ "memories": { "type": "array", "items": context_memory_schema() } }),
+                &["memories"],
+            ),
+        ),
     ]
 }
 
@@ -286,6 +338,18 @@ fn memory_version_schema() -> Value {
             "updated_at": { "type": "string", "format": "date-time" },
         }),
         &["version", "updated_at"],
+    )
+}
+
+fn context_memory_schema() -> Value {
+    object_schema(
+        json!({
+            "type": { "type": "string" },
+            "title": { "type": "string" },
+            "content": { "type": "string" },
+            "concepts": { "type": "array", "items": { "type": "string" } },
+        }),
+        &["type", "title", "content", "concepts"],
     )
 }
 

@@ -8,6 +8,14 @@ pub const TOTAL_RECALL_MEMORY_DATABASE_ENV: &str = "TOTAL_RECALL_MEMORY_DATABASE
 pub const TOTAL_RECALL_EMBEDDING_PROVIDER_ENV: &str = "TOTAL_RECALL_EMBEDDING_PROVIDER";
 pub const TOTAL_RECALL_EMBEDDING_MODEL_ENV: &str = "TOTAL_RECALL_EMBEDDING_MODEL";
 pub const TOTAL_RECALL_MCP_EMBEDDING_TIMEOUT_MS_ENV: &str = "TOTAL_RECALL_MCP_EMBEDDING_TIMEOUT_MS";
+pub const TOTAL_RECALL_MCP_CONTEXT_DEFAULT_LIMIT_ENV: &str =
+    "TOTAL_RECALL_MCP_CONTEXT_DEFAULT_LIMIT";
+pub const TOTAL_RECALL_MCP_CONTEXT_MAX_LIMIT_ENV: &str = "TOTAL_RECALL_MCP_CONTEXT_MAX_LIMIT";
+pub const TOTAL_RECALL_MCP_CONTEXT_MAX_RESULT_BYTES_ENV: &str =
+    "TOTAL_RECALL_MCP_CONTEXT_MAX_RESULT_BYTES";
+pub const TOTAL_RECALL_MCP_CONTEXT_TIMEOUT_MS_ENV: &str = "TOTAL_RECALL_MCP_CONTEXT_TIMEOUT_MS";
+pub const TOTAL_RECALL_MCP_CONTEXT_DATABASE_TIMEOUT_MS_ENV: &str =
+    "TOTAL_RECALL_MCP_CONTEXT_DATABASE_TIMEOUT_MS";
 pub const TOTAL_RECALL_MCP_MAX_LINE_BYTES_ENV: &str = "TOTAL_RECALL_MCP_MAX_LINE_BYTES";
 pub const TOTAL_RECALL_MCP_CHANNEL_CAPACITY_ENV: &str = "TOTAL_RECALL_MCP_CHANNEL_CAPACITY";
 pub const TOTAL_RECALL_MCP_MAX_IN_FLIGHT_ENV: &str = "TOTAL_RECALL_MCP_MAX_IN_FLIGHT";
@@ -17,6 +25,14 @@ pub const III_NAMESPACE_ENV: &str = "III_NAMESPACE";
 
 pub const DEFAULT_EMBEDDING_TIMEOUT_MS: u64 = 21_000;
 pub const MAX_EMBEDDING_TIMEOUT_MS: u64 = 30_000;
+pub const DEFAULT_CONTEXT_LIMIT: u32 = 10;
+pub const DEFAULT_CONTEXT_MAX_LIMIT: u32 = 20;
+pub const MAX_CONTEXT_LIMIT: u32 = 50;
+pub const DEFAULT_CONTEXT_MAX_RESULT_BYTES: usize = 32_768;
+pub const MIN_CONTEXT_RESULT_BYTES: usize = br#"{"memories":[]}"#.len();
+pub const DEFAULT_CONTEXT_TIMEOUT_MS: u64 = 5_000;
+pub const DEFAULT_CONTEXT_DATABASE_TIMEOUT_MS: u64 = 3_000;
+pub const MAX_CONTEXT_TIMEOUT_MS: u64 = 30_000;
 pub const DEFAULT_MAX_LINE_BYTES: usize = 4_194_304;
 pub const DEFAULT_CHANNEL_CAPACITY: usize = 32;
 pub const DEFAULT_MAX_IN_FLIGHT: usize = 16;
@@ -37,6 +53,8 @@ pub enum ConfigError {
     PartialEmbeddingConfiguration,
     #[error("TOTAL_RECALL_MCP_EMBEDDING_TIMEOUT_MS must be an integer from 1 through 30000")]
     InvalidEmbeddingTimeout,
+    #[error("startup context configuration is invalid")]
+    InvalidContextConfiguration,
 }
 
 #[derive(Clone, Debug, Eq, PartialEq)]
@@ -135,6 +153,7 @@ pub struct Config {
     pub channel_capacity: usize,
     pub max_in_flight: usize,
     pub query_embedding: QueryEmbeddingConfig,
+    pub context: ContextSettings,
     pub iii: ManagedIiiEnvironment,
 }
 
@@ -177,8 +196,88 @@ impl Config {
                 DEFAULT_MAX_IN_FLIGHT,
             )?,
             query_embedding: QueryEmbeddingConfig::from_values(&values)?,
+            context: ContextSettings::from_values(&values)?,
             iii: ManagedIiiEnvironment::from_values(&values),
         })
+    }
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub struct ContextSettings {
+    default_limit: u32,
+    max_limit: u32,
+    max_result_bytes: usize,
+    timeout_ms: u64,
+    database_timeout_ms: u64,
+}
+
+impl Default for ContextSettings {
+    fn default() -> Self {
+        Self {
+            default_limit: DEFAULT_CONTEXT_LIMIT,
+            max_limit: DEFAULT_CONTEXT_MAX_LIMIT,
+            max_result_bytes: DEFAULT_CONTEXT_MAX_RESULT_BYTES,
+            timeout_ms: DEFAULT_CONTEXT_TIMEOUT_MS,
+            database_timeout_ms: DEFAULT_CONTEXT_DATABASE_TIMEOUT_MS,
+        }
+    }
+}
+
+impl ContextSettings {
+    fn from_values(values: &HashMap<String, String>) -> Result<Self, ConfigError> {
+        let setting = Self {
+            default_limit: positive_u32(
+                values,
+                TOTAL_RECALL_MCP_CONTEXT_DEFAULT_LIMIT_ENV,
+                DEFAULT_CONTEXT_LIMIT,
+            )?,
+            max_limit: positive_u32(
+                values,
+                TOTAL_RECALL_MCP_CONTEXT_MAX_LIMIT_ENV,
+                DEFAULT_CONTEXT_MAX_LIMIT,
+            )?,
+            max_result_bytes: positive_usize(
+                values,
+                TOTAL_RECALL_MCP_CONTEXT_MAX_RESULT_BYTES_ENV,
+                DEFAULT_CONTEXT_MAX_RESULT_BYTES,
+            )
+            .map_err(|_| ConfigError::InvalidContextConfiguration)?,
+            timeout_ms: positive_u64(
+                values,
+                TOTAL_RECALL_MCP_CONTEXT_TIMEOUT_MS_ENV,
+                DEFAULT_CONTEXT_TIMEOUT_MS,
+            )?,
+            database_timeout_ms: positive_u64(
+                values,
+                TOTAL_RECALL_MCP_CONTEXT_DATABASE_TIMEOUT_MS_ENV,
+                DEFAULT_CONTEXT_DATABASE_TIMEOUT_MS,
+            )?,
+        };
+        if setting.default_limit > setting.max_limit
+            || setting.max_limit > MAX_CONTEXT_LIMIT
+            || setting.max_result_bytes < MIN_CONTEXT_RESULT_BYTES
+            || setting.timeout_ms > MAX_CONTEXT_TIMEOUT_MS
+            || setting.database_timeout_ms > setting.timeout_ms
+        {
+            return Err(ConfigError::InvalidContextConfiguration);
+        }
+        Ok(setting)
+    }
+
+    pub const fn default_limit(self) -> u32 {
+        self.default_limit
+    }
+    pub const fn max_limit(self) -> u32 {
+        self.max_limit
+    }
+    pub const fn max_result_bytes(self) -> usize {
+        self.max_result_bytes
+    }
+    pub const fn timeout_ms(self) -> u64 {
+        self.timeout_ms
+    }
+    pub const fn database_timeout_ms(self) -> u64 {
+        self.database_timeout_ms
     }
 }
 
@@ -201,6 +300,34 @@ fn non_blank<'a>(values: &'a HashMap<String, String>, variable: &str) -> Option<
         .get(variable)
         .map(String::as_str)
         .filter(|value| !value.trim().is_empty())
+}
+
+fn positive_u32(
+    values: &HashMap<String, String>,
+    variable: &'static str,
+    default: u32,
+) -> Result<u32, ConfigError> {
+    values.get(variable).map_or(Ok(default), |value| {
+        value
+            .parse::<u32>()
+            .ok()
+            .filter(|n| *n > 0)
+            .ok_or(ConfigError::InvalidContextConfiguration)
+    })
+}
+
+fn positive_u64(
+    values: &HashMap<String, String>,
+    variable: &'static str,
+    default: u64,
+) -> Result<u64, ConfigError> {
+    values.get(variable).map_or(Ok(default), |value| {
+        value
+            .parse::<u64>()
+            .ok()
+            .filter(|n| *n > 0)
+            .ok_or(ConfigError::InvalidContextConfiguration)
+    })
 }
 
 fn embedding_timeout_ms(values: &HashMap<String, String>) -> Result<u64, ConfigError> {
