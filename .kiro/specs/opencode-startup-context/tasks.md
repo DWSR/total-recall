@@ -73,7 +73,7 @@
   - Completion is observable when golden tests prove byte identity, structural containment, preserved ordinary Unicode, empty output, overflow-to-empty, and exclusion of provenance fields.
   - _Requirements: 2.1, 2.2, 6.1, 6.2, 6.3, 6.5, 6.6, 6.7, 6.8, 8.10, 8.11_
   - _Boundary: Context Formatter_
-- [ ] 3.3 Implement child startup and protocol readiness
+- [x] 3.3 Implement child startup and protocol readiness
   - Start the configured worker eagerly without a shell and own piped streams, the sanitized environment, and one shared startup deadline.
   - Perform exact metadata-bearing discovery and tool listing and require the server identity and strict context schema.
   - Completion is observable when tests cover successful readiness, spawn failure, identity, version, and schema mismatch, startup timeout, stderr drain, and environment isolation.
