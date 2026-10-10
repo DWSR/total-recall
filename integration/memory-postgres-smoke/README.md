@@ -78,6 +78,18 @@ nix build --print-build-logs --no-link .#postgresql17-memory-search-heads-verify
 nix build --print-build-logs --no-link .#postgresql18-memory-search-heads-verify
 ```
 
+## Current-Head Recency Migration
+
+Task 1.1 applies the transactional recency migration to seeded current heads on
+PostgreSQL 17 and 18. It checks exact-version backfill, the secured trigger and
+table privileges, old-reader compatibility, and atomic rollback after forced
+lock and statement timeouts:
+
+```sh
+nix build --print-build-logs --no-link .#postgresql17-memory-head-recency-verify
+nix build --print-build-logs --no-link .#postgresql18-memory-head-recency-verify
+```
+
 ## Embedding Lifecycle
 
 Task 5.2 verifies committed parent-before-child ordering, historical and

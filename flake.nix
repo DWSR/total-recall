@@ -123,6 +123,28 @@
               ${./integration/memory-postgres-smoke/scripts/verify-memory-search-heads.sh} > "$out"
               ${pkgs.coreutils}/bin/cat "$out"
             '';
+      mkMemoryHeadRecencyVerification =
+        pkgs: postgresql: major:
+        pkgs.runCommand "postgresql${toString major}-memory-head-recency-verify"
+          {
+            nativeBuildInputs = [
+              postgresql
+              pkgs.coreutils
+              pkgs.perl
+            ];
+            MEMORY_SCHEMA_MIGRATION = "${./crates/memory-store/migrations/0001_memory_schema_search.sql}";
+            MEMORY_RECENCY_MIGRATION = "${./crates/memory-store/migrations/0002_memory_search_head_recency.sql}";
+          }
+          ''
+            ${pkgs.bash}/bin/bash \
+              ${./integration/memory-postgres-smoke/scripts/setup.sh} \
+              ${postgresql}/bin \
+              ${toString major} \
+              -- \
+              ${pkgs.bash}/bin/bash \
+              ${./integration/memory-postgres-smoke/scripts/verify-memory-head-recency.sh} > "$out"
+            ${pkgs.coreutils}/bin/cat "$out"
+          '';
       mkMemoryEmbeddingLifecycleVerification =
         pkgs: postgresql: major:
         pkgs.runCommand "postgresql${toString major}-memory-embedding-lifecycle-verify"
@@ -668,6 +690,10 @@
           postgresql18-memory-search-heads-verify =
             mkMemorySearchHeadsVerification pkgs postgresql18Search
               18;
+          postgresql17-memory-head-recency-verify =
+            mkMemoryHeadRecencyVerification pkgs postgresql17Search 17;
+          postgresql18-memory-head-recency-verify =
+            mkMemoryHeadRecencyVerification pkgs postgresql18Search 18;
           postgresql17-memory-embedding-lifecycle-verify =
             mkMemoryEmbeddingLifecycleVerification pkgs postgresql17Search
               17;

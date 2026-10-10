@@ -1,7 +1,7 @@
 # Implementation Plan
 
 - [ ] 1. Establish the indexed memory-context domain
-- [ ] 1.1 Add and verify current-head recency state
+- [x] 1.1 Add and verify current-head recency state
   - Add the forward transactional change that records the selected canonical memory's update time on each current head.
   - Replace the secured head-maintenance behavior, backfill exact selected versions, validate non-null state, and retain existing privileges and old-reader compatibility under finite migration limits.
   - Add focused PostgreSQL 17/18 verification for the seeded baseline, exact-version backfill, successful migration, and rollback after forced lock and statement timeouts.
