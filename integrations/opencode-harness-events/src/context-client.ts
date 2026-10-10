@@ -129,8 +129,6 @@ async function drain(stream: ReadableStream<Uint8Array>): Promise<void> {
     while (!(await reader.read()).done) {
       // Child stderr is discarded while continuously drained.
     }
-  } catch {
-    // A closed pipe is already drained for privacy and backpressure purposes.
   } finally {
     reader.releaseLock();
   }
@@ -170,6 +168,24 @@ class FrameReader {
     const frame = this.frames.shift() as Uint8Array;
     this.queuedBytes -= frame.length + 1;
     return JSON.parse(this.decoder.decode(frame)) as RpcResponse;
+  }
+
+  release(): void {
+    this.reader.releaseLock();
+  }
+
+  async discardToEof(): Promise<void> {
+    this.frames.length = 0;
+    this.buffered = [];
+    this.queuedBytes = 0;
+    this.ended = false;
+    while (true) {
+      const chunk = await this.reader.read();
+      if (chunk.done) {
+        this.ended = true;
+        return;
+      }
+    }
   }
 
   private async fill(): Promise<void> {
@@ -289,6 +305,7 @@ export function createContextClient(
 ) {
   let startup: Promise<{ readonly kind: "ready" } | typeof FAILURE> | undefined;
   let child: WorkerProcess | undefined;
+  let ownedChild: WorkerProcess | undefined;
   let stderrDrain: Promise<void> | undefined;
   let frameReader: FrameReader | undefined;
   let generation = 0;
@@ -312,17 +329,25 @@ export function createContextClient(
     }
   >();
   const retired = new Map<number, Set<string>>();
-  let pump: Promise<void> | undefined;
+  const pumps = new Map<number, Promise<void>>();
+  const pumpReady = new Map<number, Promise<void>>();
+  const resolvePumpReady = new Map<number, () => void>();
+  let closing = false;
+  let closePromise: Promise<void> | undefined;
+  let terminationRequested = false;
+  let childExited = false;
+  let shutdownFailed = false;
+  let cancelStartup: (() => void) | undefined;
 
-  function failGeneration(): void {
+  function failGeneration(failedGeneration = generation): void {
+    if (generation !== failedGeneration) return;
     if (generationFailed) return;
     generationFailed = true;
     if (startupReady) startup = undefined;
-    pump = undefined;
     writeChain = Promise.resolve();
     for (const waiter of pending.values()) waiter.resolve(FAILURE);
     pending.clear();
-    child?.kill("SIGKILL");
+    if (!closing && !childExited) child?.kill("SIGKILL");
   }
 
   const startEnabled = async (
@@ -334,9 +359,18 @@ export function createContextClient(
     let readerReleased = false;
     let active = true;
     let readiness: Promise<{ readonly kind: "ready" }> | undefined;
+    let startedGeneration = 0;
+    let startedReader: FrameReader | undefined;
+    let startedChild: WorkerProcess | undefined;
     const startupDeadline = Date.now() + settings.startupTimeoutMs;
     const deadline = new Promise<typeof FAILURE>((resolve) => {
       timer = setTimeout(() => resolve(FAILURE), settings.startupTimeoutMs);
+    });
+    const cancelled = new Promise<typeof FAILURE>((resolve) => {
+      cancelStartup = () => {
+        active = false;
+        resolve(FAILURE);
+      };
     });
     try {
       generationsStarted += 1;
@@ -350,11 +384,29 @@ export function createContextClient(
         stdout: "pipe",
         stderr: "pipe",
       });
+      startedChild = currentChild;
       child = currentChild;
+      ownedChild = currentChild;
+      terminationRequested = false;
+      childExited = false;
       let exited = false;
+      generation += 1;
+      const currentGeneration = generation;
+      startedGeneration = currentGeneration;
+      pumpReady.set(
+        currentGeneration,
+        new Promise<void>((resolve) =>
+          resolvePumpReady.set(currentGeneration, resolve),
+        ),
+      );
       const exit = currentChild.exited.then(() => {
         exited = true;
-        if (!generationFailed && child === currentChild) failGeneration();
+        childExited = true;
+        if (child === currentChild) child = undefined;
+        if (shutdownFailed && ownedChild === currentChild)
+          ownedChild = undefined;
+        if (!generationFailed && generation === currentGeneration)
+          failGeneration(currentGeneration);
         return FAILURE;
       });
       if (Date.now() >= startupDeadline) {
@@ -363,8 +415,8 @@ export function createContextClient(
       }
       stderrDrain = drain(child.stderr);
       reader = child.stdout.getReader();
-      generation += 1;
       const currentReader = new FrameReader(reader, settings.maxFrameBytes);
+      startedReader = currentReader;
       frameReader = currentReader;
       readiness = (async () => {
         if (!active) {
@@ -402,13 +454,22 @@ export function createContextClient(
           throw new Error("invalid tool schema");
         }
         readerReleased = true;
+        startPump(currentGeneration, currentReader);
         return { kind: "ready" } as const;
       })();
-      const outcome = await Promise.race([readiness, deadline, exit]);
+      const outcome = await Promise.race([
+        readiness,
+        deadline,
+        exit,
+        cancelled,
+      ]);
       if (outcome.kind === "failure") {
         active = false;
         generationFailed = true;
-        if (!exited) currentChild.kill("SIGKILL");
+        if (!exited) {
+          terminationRequested = true;
+          currentChild.kill("SIGKILL");
+        }
         return FAILURE;
       }
       startupReady = true;
@@ -416,12 +477,16 @@ export function createContextClient(
     } catch {
       active = false;
       generationFailed = true;
-      child?.kill("SIGKILL");
+      if (child !== undefined) {
+        terminationRequested = true;
+        child.kill("SIGKILL");
+      }
       return FAILURE;
     } finally {
       if (timer !== undefined) {
         clearTimeout(timer);
       }
+      cancelStartup = undefined;
       if (reader !== undefined && !readerReleased) {
         const releaseReader = () => {
           if (!readerReleased) {
@@ -432,14 +497,90 @@ export function createContextClient(
         if (readiness === undefined) {
           releaseReader();
         } else {
-          readiness.then(releaseReader, releaseReader).catch(() => undefined);
+          readiness
+            .then(
+              () => {
+                if (startedReader !== undefined && startedChild !== undefined)
+                  startPump(startedGeneration, startedReader);
+                else releaseReader();
+              },
+              () => {
+                if (startedReader !== undefined && startedChild !== undefined)
+                  startPump(startedGeneration, startedReader);
+                else releaseReader();
+              },
+            )
+            .catch(() => undefined);
         }
       }
     }
   };
 
+  function startPump(pumpGeneration: number, pumpReader: FrameReader): void {
+    if (pumps.has(pumpGeneration)) return;
+    resolvePumpReady.get(pumpGeneration)?.();
+    resolvePumpReady.delete(pumpGeneration);
+    let pump!: Promise<void>;
+    pump = (async () => {
+      try {
+        while (true) {
+          const response = await pumpReader.next();
+          if (closing || generationFailed || pumpGeneration !== generation)
+            continue;
+          const retiredIds = retired.get(pumpGeneration);
+          if (retiredIds?.has(response.id as string)) {
+            retiredIds.delete(response.id as string);
+            continue;
+          }
+          if (
+            response.jsonrpc !== "2.0" ||
+            typeof response.id !== "string" ||
+            !pending.has(response.id)
+          )
+            throw new Error("unknown protocol response");
+          const waiter = pending.get(response.id) as typeof pending extends Map<
+            string,
+            infer V
+          >
+            ? V
+            : never;
+          pending.delete(response.id);
+          const resultValue = response.result;
+          const memories = (resultValue as { memories?: unknown } | undefined)
+            ?.memories;
+          const exactResult =
+            typeof resultValue === "object" &&
+            resultValue !== null &&
+            !Array.isArray(resultValue) &&
+            Object.keys(resultValue).length === 1 &&
+            Object.hasOwn(resultValue, "memories");
+          if (response.error !== undefined) waiter.resolve(FAILURE);
+          else if (
+            !(exactResult && Array.isArray(memories)) ||
+            !memories.every((item) => validMemory(item))
+          ) {
+            waiter.resolve(FAILURE);
+            failGeneration(pumpGeneration);
+          } else
+            waiter.resolve({
+              kind: "context",
+              memories: memories as ContextMemory[],
+            });
+        }
+      } catch {
+        if (closing) await pumpReader.discardToEof();
+        else failGeneration(pumpGeneration);
+      } finally {
+        pumpReader.release();
+        if (pumps.get(pumpGeneration) === pump) pumps.delete(pumpGeneration);
+      }
+    })();
+    pumps.set(pumpGeneration, pump);
+  }
+
   return {
     start(): Promise<{ readonly kind: "ready" } | typeof FAILURE> {
+      if (closing) return Promise.resolve(FAILURE);
       if (startup !== undefined) {
         return startup;
       }
@@ -463,6 +604,7 @@ export function createContextClient(
         }
       | typeof FAILURE
     > {
+      if (closing) return FAILURE;
       const lookupTimeout =
         config.mode === "enabled" ? config.settings.lookupTimeoutMs : 0;
       const deadline = Date.now() + lookupTimeout;
@@ -504,66 +646,12 @@ export function createContextClient(
       >((resolve) => pending.set(id, { resolve }));
       const requestChild = child;
       const requestGeneration = generation;
-      const requestReader = frameReader;
       writeChain = writeChain.then(async () => {
         if (generationFailed || generation !== requestGeneration)
           throw new Error("worker generation failed");
         await requestChild.stdin.write(`${message}\n`);
       });
-      writeChain.catch(() => failGeneration());
-      if (pump === undefined) {
-        let generationPump!: Promise<void>;
-        generationPump = (async () => {
-          try {
-            while (pending.size > 0) {
-              const response = await requestReader.next();
-              if (generation !== requestGeneration) return;
-              const retiredIds = retired.get(requestGeneration);
-              if (retiredIds?.has(response.id as string)) {
-                retiredIds.delete(response.id as string);
-                continue;
-              }
-              if (
-                response.jsonrpc !== "2.0" ||
-                typeof response.id !== "string" ||
-                !pending.has(response.id)
-              )
-                throw new Error("unknown protocol response");
-              const waiter = pending.get(
-                response.id,
-              ) as typeof pending extends Map<string, infer V> ? V : never;
-              pending.delete(response.id);
-              const memories = (
-                response.result as { memories?: unknown } | undefined
-              )?.memories;
-              const resultValue = response.result;
-              const exactResult =
-                typeof resultValue === "object" &&
-                resultValue !== null &&
-                !Array.isArray(resultValue) &&
-                Object.keys(resultValue).length === 1 &&
-                Object.hasOwn(resultValue, "memories");
-              if (response.error !== undefined) waiter.resolve(FAILURE);
-              else if (
-                !(exactResult && Array.isArray(memories)) ||
-                !memories.every((item) => validMemory(item))
-              ) {
-                waiter.resolve(FAILURE);
-                failGeneration();
-              } else
-                waiter.resolve({
-                  kind: "context",
-                  memories: memories as ContextMemory[],
-                });
-            }
-          } catch {
-            failGeneration();
-          } finally {
-            if (pump === generationPump) pump = undefined;
-          }
-        })();
-        pump = generationPump;
-      }
+      writeChain.catch(() => failGeneration(requestGeneration));
       let timer: ReturnType<typeof setTimeout> | undefined;
       const timeout = new Promise<typeof FAILURE>((resolve) => {
         timer = setTimeout(
@@ -593,6 +681,92 @@ export function createContextClient(
     },
     get stderrDrained(): Promise<void> | undefined {
       return stderrDrain;
+    },
+    close(): Promise<void> {
+      if (closePromise !== undefined) return closePromise;
+      closing = true;
+      cancelStartup?.();
+      const timeoutMs =
+        config.mode === "enabled" ? config.settings.shutdownTimeoutMs : 1;
+      const deadline = Date.now() + timeoutMs;
+      closePromise = (async () => {
+        for (const waiter of pending.values()) waiter.resolve(FAILURE);
+        pending.clear();
+        const within = async (promise: Promise<unknown>, ms: number) => {
+          if (ms <= 0) return false;
+          let timer: ReturnType<typeof setTimeout> | undefined;
+          try {
+            return await Promise.race([
+              promise.then(
+                () => true,
+                () => false,
+              ),
+              new Promise<boolean>((resolve) => {
+                timer = setTimeout(() => resolve(false), ms);
+              }),
+            ]);
+          } finally {
+            if (timer !== undefined) clearTimeout(timer);
+          }
+        };
+        if (startup !== undefined) {
+          await within(startup, deadline - Date.now());
+          if (Date.now() >= deadline) {
+            shutdownFailed = true;
+            throw new Error("context_shutdown_failed");
+          }
+        }
+        const current = ownedChild;
+        if (current === undefined) return;
+        try {
+          current.stdin.end();
+        } catch {
+          /* stdin is already closed */
+        }
+        const exited = current.exited.then(
+          () => true,
+          () => true,
+        );
+        let sentTerm = false;
+        if (!terminationRequested && !childExited) {
+          try {
+            current.kill("SIGTERM");
+            terminationRequested = true;
+            sentTerm = true;
+          } catch {
+            /* child may have exited */
+          }
+        }
+        const stdoutDrained = (
+          pumpReady.get(generation) ?? Promise.resolve()
+        ).then(() => pumps.get(generation) ?? Promise.resolve());
+        const drainPipes = Promise.all([
+          stdoutDrained,
+          stderrDrain ?? drain(current.stderr),
+        ]);
+        const remaining = Math.max(0, deadline - Date.now());
+        const grace = Math.min(250, Math.floor(remaining / 2));
+        let hasExited =
+          childExited ||
+          (await within(exited, sentTerm ? grace : deadline - Date.now()));
+        if (!hasExited && Date.now() < deadline) {
+          try {
+            current.kill("SIGKILL");
+          } catch {
+            /* child may have exited */
+          }
+          hasExited = await within(exited, deadline - Date.now());
+        }
+        const pipesDrained = await within(drainPipes, deadline - Date.now());
+        if (!hasExited || !pipesDrained) {
+          shutdownFailed = true;
+          if (childExited && ownedChild === current) ownedChild = undefined;
+          throw new Error("context_shutdown_failed");
+        }
+        if (ownedChild === current) ownedChild = undefined;
+        pumpReady.delete(generation);
+      })();
+      return closePromise;
     },
   };
 }

@@ -19,6 +19,7 @@ const config = fromValues({
 });
 const SPAWN_DELAY_OVER_DEADLINE_MS = 20;
 const REPLACEMENT_LOOKUP_TIMEOUT_MS = 1000;
+const SHUTDOWN_BOUND_SLACK_MS = 100;
 const CONTEXT_FRAME_TEST_CONTENT_BYTES = 34_000;
 const QUEUED_PARTIAL_BOUNDARY_CONTENT_BYTES = 65_420;
 
@@ -84,6 +85,10 @@ function mockWorker(options: {
   readonly blockFirstWrite?: boolean;
   readonly failSpawn?: boolean;
   readonly onSpawn?: () => void;
+  readonly exitOnTerm?: boolean;
+  readonly neverExitOnKill?: boolean;
+  readonly holdStderrDrain?: boolean;
+  readonly holdStdoutOnEnd?: boolean;
   readonly contextResult?: unknown;
   readonly responseMode?:
     | "fragmented"
@@ -99,10 +104,13 @@ function mockWorker(options: {
   let spawnOptions: unknown;
   let stdoutController: ReadableStreamDefaultController<Uint8Array>;
   let killed = false;
+  const signals: Array<number | NodeJS.Signals | undefined> = [];
+  let stdinClosed = false;
   let queuedOutput = "";
   let firstCallFrame = "";
   let resolveFirstWrite: (() => void) | undefined;
   let resolveExit: ((code: number) => void) | undefined;
+  let resolveStderrDrain: (() => void) | undefined;
   const child = {
     stdin: {
       write: (text: string): void | Promise<void> => {
@@ -224,7 +232,10 @@ function mockWorker(options: {
         }
         stdoutController.enqueue(new TextEncoder().encode(frame));
       },
-      end: () => stdoutController.close(),
+      end: () => {
+        stdinClosed = true;
+        if (!options.holdStdoutOnEnd) stdoutController.close();
+      },
     },
     stdout: new ReadableStream<Uint8Array>({
       start(controller) {
@@ -233,7 +244,16 @@ function mockWorker(options: {
     }),
     stderr: new ReadableStream<Uint8Array>(
       {
-        pull(controller) {
+        async pull(controller) {
+          if (options.holdStderrDrain) {
+            await new Promise<void>((resolve) => {
+              resolveStderrDrain = () => {
+                controller.close();
+                resolve();
+              };
+            });
+            return;
+          }
           stderrDrained = true;
           controller.enqueue(new TextEncoder().encode("private stderr"));
           controller.close();
@@ -247,8 +267,15 @@ function mockWorker(options: {
     exited: new Promise<number>((resolve) => {
       resolveExit = resolve;
     }),
-    kill: () => {
+    kill: (signal?: number | NodeJS.Signals) => {
+      signals.push(signal);
       killed = true;
+      if (
+        (signal === "SIGKILL" && !options.neverExitOnKill) ||
+        (signal === "SIGTERM" && options.exitOnTerm)
+      ) {
+        resolveExit?.(1);
+      }
     },
   };
   return {
@@ -263,8 +290,26 @@ function mockWorker(options: {
     get killed() {
       return killed;
     },
+    get signals() {
+      return signals;
+    },
+    get stdinClosed() {
+      return stdinClosed;
+    },
     resolveFirstWrite() {
       resolveFirstWrite?.();
+    },
+    resolveStderrDrain() {
+      resolveStderrDrain?.();
+    },
+    sendRaw(text: string) {
+      stdoutController.enqueue(new TextEncoder().encode(text));
+    },
+    errorStdout() {
+      stdoutController.error(new Error("private stream failure"));
+    },
+    closeStdout() {
+      stdoutController.close();
     },
     exit() {
       resolveExit?.(1);
@@ -335,6 +380,230 @@ test("starts enabled worker without a shell and completes metadata-bearing disco
     stderr: "pipe",
   });
   expect(JSON.stringify(fake.spawnOptions)).not.toContain("PATH");
+});
+
+test("close is idempotent, closes stdin, settles pending calls, and escalates to KILL", async () => {
+  if (config.mode !== "enabled") throw new Error("expected enabled settings");
+  const fake = mockWorker({ holdResponses: true });
+  const client = createContextClient(config, fake.spawn as never);
+  const request = client.request(1);
+  while (!fake.requests.some((item) => item.method === "tools/call"))
+    await new Promise((resolve) => setTimeout(resolve, 0));
+  const firstClose = client.close();
+  expect(await request).toEqual({
+    kind: "failure",
+    category: "context_startup_failed",
+  });
+  await client.close();
+  await firstClose;
+  expect(fake.stdinClosed).toBe(true);
+  expect(fake.signals).toEqual(["SIGTERM", "SIGKILL"]);
+  expect(client.process).toBeUndefined();
+  expect(await client.request(1)).toEqual({
+    kind: "failure",
+    category: "context_startup_failed",
+  });
+  expect(fake.signals).toEqual(["SIGTERM", "SIGKILL"]);
+});
+
+test("keeps one stdout reader while idle and drains it through EOF during close", async () => {
+  if (config.mode !== "enabled") throw new Error("expected enabled settings");
+  const fake = mockWorker({});
+  const client = createContextClient(config, fake.spawn as never);
+  await client.start();
+  expect(() => fake.child.stdout.getReader()).toThrow();
+  await client.close();
+  expect(() => fake.child.stdout.getReader()).not.toThrow();
+  expect(client.process).toBeUndefined();
+});
+
+test("close discards malformed stdout with the persistent reader through EOF", async () => {
+  if (config.mode !== "enabled") throw new Error("expected enabled settings");
+  const fake = mockWorker({ holdStdoutOnEnd: true });
+  const client = createContextClient(config, fake.spawn as never);
+  await client.start();
+  const close = client.close();
+  fake.sendRaw("{not-json}\\n");
+  fake.closeStdout();
+  fake.exit();
+  await close;
+  expect(() => fake.child.stdout.getReader()).not.toThrow();
+  expect(client.process).toBeUndefined();
+});
+
+test("close fails when stdout errors before EOF can be confirmed", async () => {
+  if (config.mode !== "enabled") throw new Error("expected enabled settings");
+  const boundedConfig = fromValues({
+    TOTAL_RECALL_CONTEXT_BIN: "/absolute/worker",
+    TOTAL_RECALL_MEMORY_DATABASE: "memory-db",
+    TOTAL_RECALL_CONTEXT_SHUTDOWN_TIMEOUT_MS: "30",
+  });
+  if (boundedConfig.mode !== "enabled")
+    throw new Error("expected enabled settings");
+  const fake = mockWorker({ holdStdoutOnEnd: true });
+  const client = createContextClient(boundedConfig, fake.spawn as never);
+  await client.start();
+  const close = client.close();
+  fake.errorStdout();
+  fake.exit();
+  await expect(close).rejects.toThrow("context_shutdown_failed");
+  expect(() => fake.child.stdout.getReader()).not.toThrow();
+});
+
+test("close reports bounded failure and retains ownership until delayed exit", async () => {
+  const boundedConfig = fromValues({
+    TOTAL_RECALL_CONTEXT_BIN: "/absolute/worker",
+    TOTAL_RECALL_MEMORY_DATABASE: "memory-db",
+    TOTAL_RECALL_CONTEXT_SHUTDOWN_TIMEOUT_MS: "30",
+  });
+  if (boundedConfig.mode !== "enabled")
+    throw new Error("expected enabled settings");
+  const fake = mockWorker({ holdResponses: true, neverExitOnKill: true });
+  const client = createContextClient(boundedConfig, fake.spawn as never);
+  const request = client.request(1);
+  while (!fake.requests.some((item) => item.method === "tools/call"))
+    await new Promise((resolve) => setTimeout(resolve, 0));
+  const startedAt = Date.now();
+  const close = client.close();
+  await expect(close).rejects.toThrow("context_shutdown_failed");
+  expect(Date.now() - startedAt).toBeLessThan(SHUTDOWN_BOUND_SLACK_MS);
+  expect(fake.signals).toEqual(["SIGTERM", "SIGKILL"]);
+  expect(client.process).toBeDefined();
+  expect(await request).toEqual({
+    kind: "failure",
+    category: "context_startup_failed",
+  });
+  expect(client.close()).toBe(close);
+  fake.exit();
+  await fake.child.exited;
+  await new Promise((resolve) => setTimeout(resolve, 0));
+  expect(client.process).toBeUndefined();
+});
+
+test("close fails by its deadline when an exited child's pipe drain is pending", async () => {
+  const boundedConfig = fromValues({
+    TOTAL_RECALL_CONTEXT_BIN: "/absolute/worker",
+    TOTAL_RECALL_MEMORY_DATABASE: "memory-db",
+    TOTAL_RECALL_CONTEXT_SHUTDOWN_TIMEOUT_MS: "30",
+  });
+  if (boundedConfig.mode !== "enabled")
+    throw new Error("expected enabled settings");
+  const fake = mockWorker({ exitOnTerm: true, holdStderrDrain: true });
+  const client = createContextClient(boundedConfig, fake.spawn as never);
+  await client.start();
+  const startedAt = Date.now();
+  await expect(client.close()).rejects.toThrow("context_shutdown_failed");
+  expect(Date.now() - startedAt).toBeLessThan(SHUTDOWN_BOUND_SLACK_MS);
+  expect(client.process).toBeUndefined();
+  fake.resolveStderrDrain();
+});
+
+test("close stays bounded during a pending readiness write and ignores its late resolution", async () => {
+  const boundedConfig = fromValues({
+    TOTAL_RECALL_CONTEXT_BIN: "/absolute/worker",
+    TOTAL_RECALL_MEMORY_DATABASE: "memory-db",
+    TOTAL_RECALL_CONTEXT_SHUTDOWN_TIMEOUT_MS: "30",
+  });
+  if (boundedConfig.mode !== "enabled")
+    throw new Error("expected enabled settings");
+  const fake = mockWorker({ blockFirstWrite: true, neverExitOnKill: true });
+  const client = createContextClient(boundedConfig, fake.spawn as never);
+  const starting = client.start();
+  while (fake.requests.length === 0)
+    await new Promise((resolve) => setTimeout(resolve, 0));
+
+  const startedAt = Date.now();
+  const close = client.close();
+  await expect(close).rejects.toThrow("context_shutdown_failed");
+  expect(Date.now() - startedAt).toBeLessThan(SHUTDOWN_BOUND_SLACK_MS);
+  expect(client.process).toBeDefined();
+  expect(fake.requests.map((request) => request.method)).toEqual([
+    "server/discover",
+  ]);
+
+  fake.resolveFirstWrite();
+  expect(await starting).toEqual({
+    kind: "failure",
+    category: "context_startup_failed",
+  });
+  await new Promise((resolve) => setTimeout(resolve, 0));
+  expect(fake.requests.map((request) => request.method)).toEqual([
+    "server/discover",
+  ]);
+  expect(client.process).toBeDefined();
+  expect(client.close()).toBe(close);
+
+  fake.exit();
+  await fake.child.exited;
+  await new Promise((resolve) => setTimeout(resolve, 0));
+  expect(client.process).toBeUndefined();
+});
+
+test("close during replacement readiness settles startup and releases child ownership", async () => {
+  if (config.mode !== "enabled") throw new Error("expected enabled settings");
+  const shortConfig = {
+    ...config,
+    settings: { ...config.settings, lookupTimeoutMs: 15 },
+  };
+  const first = mockWorker({ holdResponses: true });
+  const replacement = mockWorker({ holdReadiness: true });
+  let spawns = 0;
+  const client = createContextClient(shortConfig, ((options: never) => {
+    spawns += 1;
+    if (spawns === 1) return first.spawn(options);
+    return replacement.spawn(options);
+  }) as never);
+  expect((await client.request(1)).kind).toBe("failure");
+  const pendingLookup = client.request(1);
+  while (replacement.requests.length === 0)
+    await new Promise((resolve) => setTimeout(resolve, 0));
+  const close = client.close();
+  expect(client.close()).toBe(close);
+  expect(await pendingLookup).toEqual({
+    kind: "failure",
+    category: "context_startup_failed",
+  });
+  await close;
+  expect(replacement.signals).toContain("SIGKILL");
+  expect(client.process).toBeUndefined();
+  expect(() => replacement.child.stdout.getReader()).not.toThrow();
+});
+
+test("close handles ready, failed, restarting, and already-exited clients", async () => {
+  if (config.mode !== "enabled") throw new Error("expected enabled settings");
+  const ready = mockWorker({ exitOnTerm: true });
+  const readyClient = createContextClient(config, ready.spawn as never);
+  await readyClient.start();
+  await readyClient.close();
+  expect(ready.signals).toEqual(["SIGTERM"]);
+  expect(readyClient.process).toBeUndefined();
+
+  const alreadyExited = mockWorker({ holdReadiness: false });
+  const alreadyExitedClient = createContextClient(
+    config,
+    alreadyExited.spawn as never,
+  );
+  await alreadyExitedClient.start();
+  alreadyExited.exit();
+  await alreadyExited.child.exited;
+  await alreadyExitedClient.close();
+  expect(alreadyExitedClient.process).toBeUndefined();
+
+  const failed = mockWorker({ serverName: "wrong" });
+  const failedClient = createContextClient(config, failed.spawn as never);
+  await failedClient.start();
+  await failedClient.close();
+  expect(failed.signals).toEqual(["SIGKILL"]);
+
+  const exited = mockWorker({ holdReadiness: true });
+  const exitedClient = createContextClient(config, exited.spawn as never);
+  const starting = exitedClient.start();
+  await new Promise((resolve) => setTimeout(resolve, 0));
+  exited.exit();
+  await starting;
+  await exitedClient.close();
+  expect(exited.signals).toEqual([]);
+  expect(exitedClient.process).toBeUndefined();
 });
 
 test("maps spawn failure and readiness mismatches to fixed startup failure", async () => {
@@ -454,7 +723,9 @@ test("startup timeout stops a blocked write continuation and retains stdout owne
   expect(fake.requests.map((request) => request.method)).toEqual([
     "server/discover",
   ]);
-  expect(() => fake.child.stdout.getReader().releaseLock()).not.toThrow();
+  expect(() => fake.child.stdout.getReader()).toThrow();
+  await client.close();
+  expect(() => fake.child.stdout.getReader()).not.toThrow();
 });
 
 test("does not send readiness when synchronous spawn consumes the startup deadline", async () => {
