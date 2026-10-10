@@ -101,7 +101,7 @@
   - _Depends: 3.5_
   - _Requirements: 4.9, 8.3, 8.6, 8.7, 8.10, 8.11_
   - _Boundary: MCP Client_
-- [ ] 3.7 Freeze shared lookup outcomes
+- [x] 3.7 Freeze shared lookup outcomes
   - Share the first session-owned lookup and absolute deadline across concurrent hooks and freeze exact text or empty for every terminal outcome.
   - Keep parent, child, resumed, and independent IDs separate without eviction or refresh after backend changes.
   - Completion is observable when tests cover success, empty, failure, timeout, concurrency, session isolation, and immutable repeat results.
@@ -217,3 +217,4 @@
 ## Implementation Notes
 
 - Reopened task 3.5 after task 3.6 exposed a response-pump ownership defect; generation-scoped pumps now keep failed generations from blocking replacements.
+- Task 3.7 review: task 3.8 should assert frozen-empty repeat results (no second lookup after empty/failed freeze) and consider guarding synchronous `transport.request` throws at the runtime seam.
