@@ -13,9 +13,9 @@ use mcp_worker::{
     embedding::RouterQueryEmbeddingGenerator,
     runtime::{RuntimeError, RuntimeInput, RuntimeShutdown, run_mcp_server},
     server::McpServer,
-    service::{MemoryToolService, ProductionCreateContext},
+    service::{MemoryToolService, ProductionCreateContext, StartupContextService},
 };
-use memory_store::{MemoryStore, database::IiiMemoryDatabase};
+use memory_store::{MemoryContextStore, MemoryStore, database::IiiMemoryDatabase};
 use tokio::{
     io::{AsyncRead, ReadBuf},
     sync::mpsc,
@@ -72,7 +72,11 @@ async fn run_production(
     let operations = ProductionMemoryOperations::new(canonical_store, retrieval);
     let generator = query_embedding_generator(&config.query_embedding, &client);
     let service = MemoryToolService::new(operations, ProductionCreateContext, generator);
-    let server = McpServer::new(service);
+    let context_database = IiiMemoryDatabase::new(client.clone(), config.database.clone())
+        .with_context_timeout_ms(config.context.database_timeout_ms());
+    let context_store = MemoryContextStore::new(context_database);
+    let context_service = StartupContextService::new(context_store, config.context);
+    let server = McpServer::new(service).with_startup_context(context_service);
     let (input, queue) = RuntimeInput::new(stdin, &config);
     let shutdown = RuntimeShutdown::new();
     let runtime = run_mcp_server(

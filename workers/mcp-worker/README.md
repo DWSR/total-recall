@@ -11,6 +11,11 @@
 | `TOTAL_RECALL_MCP_MAX_LINE_BYTES` | No | `4194304` | Positive `usize` |
 | `TOTAL_RECALL_MCP_CHANNEL_CAPACITY` | No | `32` | Positive `usize` |
 | `TOTAL_RECALL_MCP_MAX_IN_FLIGHT` | No | `16` | Positive `usize` |
+| `TOTAL_RECALL_MCP_CONTEXT_DEFAULT_LIMIT` | No | `10` | Positive count no greater than the maximum |
+| `TOTAL_RECALL_MCP_CONTEXT_MAX_LIMIT` | No | `20` | Integer `1..=50` |
+| `TOTAL_RECALL_MCP_CONTEXT_MAX_RESULT_BYTES` | No | `32768` | Positive byte bound large enough for `{"memories":[]}` |
+| `TOTAL_RECALL_MCP_CONTEXT_TIMEOUT_MS` | No | `5000` | Integer `1..=30000` |
+| `TOTAL_RECALL_MCP_CONTEXT_DATABASE_TIMEOUT_MS` | No | `3000` | Integer `1..=context timeout` |
 | `III_URL` | No | iii SDK default | Existing managed iii convention |
 | `III_WORKER_NAME` | No | SDK-managed name | Existing managed iii convention |
 | `III_NAMESPACE` | No | iii SDK default | Existing managed iii convention |
@@ -25,6 +30,12 @@ SDK-managed name unset; a whitespace-only `III_WORKER_NAME` is retained.
 Startup starts the iii background connection but does not await readiness or
 probe the database. Connectivity failures occur only when a tool invokes the
 backend.
+
+`memory_context` is the sixth tool. Its optional `limit` is query-free and must
+be within the configured maximum. The worker returns only type, title, content,
+and concepts, with complete records capped by the configured structured-result
+byte limit. Database and operation failures return fixed tool errors without
+partial context.
 
 Query embedding is disabled when `TOTAL_RECALL_EMBEDDING_PROVIDER` and
 `TOTAL_RECALL_EMBEDDING_MODEL` are both absent, empty, or whitespace-only;

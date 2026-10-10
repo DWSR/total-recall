@@ -16,6 +16,20 @@ same loopback engine. Exact and latest retrieval cover complete canonical
 records, not-found, invalid-input, malformed-response, and backend-failure
 flows through that engine.
 
+Every process launch supplies the worker context settings explicitly: default
+count `10`, maximum count `20`, result bytes `32768`, operation timeout `5000`
+ms, and database timeout `3000` ms. These match the worker launch-settings
+contract; the six-tool registry includes `memory_context`.
+
+The context process scenarios exercise narrow success, empty rows, the
+field-free oversized sentinel, malformed rows, opaque backend failure, and
+database-deadline handling, plus invalid-input rejection for unknown/query
+fields, explicit `null`, zero, and over-maximum counts. They capture the exact context SQL and positional
+`[count, candidate_bytes]` parameters, require no database call for invalid
+input, and verify the exact four-field memory result with no provenance. The
+database-engine fake separately verifies empty, oversized, malformed, remote
+failure, and delayed SDK-deadline outcomes. No PostgreSQL service is started.
+
 Build the worker, then pass its absolute release path to the fake:
 
 ```sh
@@ -140,7 +154,6 @@ the checked next offset; an empty page has no next offset. Invalid IDs, offsets,
 and limits make no database invocation before the fake deadline. Backend
 failures return text-only errors with no structured or protected values. No
 PostgreSQL service is started.
-
 The retrieval scenarios capture the exact `(id, version)` query and the latest
 head-to-memory join query. They verify every canonical memory field, latest-head
 selection without an `ORDER BY` claim, absent embeddings, text-only errors, and

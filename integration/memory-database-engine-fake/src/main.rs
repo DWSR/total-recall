@@ -3,11 +3,14 @@ use std::{error::Error, fmt, time::Duration};
 use chrono::{TimeZone, Utc};
 use futures_util::{SinkExt, StreamExt};
 use iii_sdk::{IIIClient, InitOptions, WorkerIdentityMode, register_worker};
+use memory_store::MemoryContextStore;
 use memory_store::{
+    MemoryContextDatabase,
     contracts::{
-        Bm25Search, DatabaseError, DatabaseOperation, DatabaseTarget, EmbeddingInput,
-        MemorySearchResult, MemoryVersionInput, ValidatedBm25Search, ValidatedEmbedding,
-        ValidatedMemoryVersion, ValidatedVectorSearch, VectorSearch,
+        Bm25Search, ContextCandidate, ContextQuery, DatabaseError, DatabaseOperation,
+        DatabaseTarget, EmbeddingInput, MemorySearchResult, MemoryVersionInput,
+        ValidatedBm25Search, ValidatedContextQuery, ValidatedEmbedding, ValidatedMemoryVersion,
+        ValidatedVectorSearch, VectorSearch,
     },
     database::{IiiMemoryDatabase, MemoryDatabase},
 };
@@ -15,7 +18,7 @@ use serde_json::{Map, Value, json};
 use tokio::{
     net::{TcpListener, TcpStream},
     task::JoinHandle,
-    time::timeout,
+    time::{sleep, timeout},
 };
 use tokio_tungstenite::{WebSocketStream, accept_async, tungstenite::Message};
 use uuid::Uuid;
@@ -199,6 +202,36 @@ ORDER BY scored_heads.relevance DESC,
          scored_heads.version ASC
 LIMIT $2::text::bigint"#;
 
+const SEARCH_CONTEXT_SQL: &str = r#"WITH bounded_heads AS MATERIALIZED (
+    SELECT head.id, head.version, head.updated_at
+    FROM public.memory_search_heads AS head
+    ORDER BY head.updated_at DESC, head.id COLLATE "C" ASC, head.version DESC
+    LIMIT $1::text::bigint
+), sized_candidates AS MATERIALIZED (
+    SELECT bounded_heads.updated_at, bounded_heads.id, bounded_heads.version,
+           memory.type AS memory_type, memory.title, memory.content, memory.concepts,
+           octet_length(json_build_object('type', memory.type, 'title', memory.title,
+               'content', memory.content, 'concepts', memory.concepts)::text) AS candidate_bytes,
+           row_number() OVER (ORDER BY bounded_heads.updated_at DESC,
+               bounded_heads.id COLLATE "C" ASC, bounded_heads.version DESC) AS candidate_position
+    FROM bounded_heads
+    JOIN public.memories AS memory ON memory.id = bounded_heads.id AND memory.version = bounded_heads.version
+), candidates AS MATERIALIZED (
+    SELECT sized_candidates.*,
+           min(candidate_position) FILTER (WHERE candidate_bytes > $2::text::numeric) OVER ()
+               AS first_oversized_position
+    FROM sized_candidates
+)
+SELECT CASE WHEN candidate_bytes > $2::text::numeric THEN true ELSE false END AS oversized,
+       CASE WHEN candidate_bytes > $2::text::numeric THEN NULL ELSE memory_type END AS memory_type,
+       CASE WHEN candidate_bytes > $2::text::numeric THEN NULL ELSE title END AS title,
+       CASE WHEN candidate_bytes > $2::text::numeric THEN NULL ELSE content END AS content,
+       CASE WHEN candidate_bytes > $2::text::numeric THEN NULL ELSE to_json(concepts) END AS concepts,
+       candidate_bytes::text AS candidate_bytes
+FROM candidates
+WHERE first_oversized_position IS NULL OR candidate_position <= first_oversized_position
+ORDER BY updated_at DESC, id COLLATE "C" ASC, version DESC"#;
+
 type VerificationResult<T = ()> = Result<T, VerificationError>;
 
 #[derive(Clone, Copy, Debug)]
@@ -248,6 +281,7 @@ struct ExpectedInvocation {
 enum Reply {
     Result(Value),
     RemoteFailure,
+    DelayedResult(Value, Duration),
 }
 
 struct Fixture {
@@ -313,11 +347,130 @@ async fn main() -> VerificationResult {
 
 async fn run_protocol_verification() -> VerificationResult {
     verify_compliant_operations().await?;
+    verify_context_operation().await?;
+    verify_context_terminal_outcomes().await?;
     verify_write_outcomes_are_typed_and_opaque().await?;
     verify_remote_failures_are_typed_and_opaque().await?;
     verify_malformed_responses_are_typed_and_opaque().await?;
     verify_protocol_rejections_are_strict()?;
     Ok(())
+}
+
+async fn verify_context_operation() -> VerificationResult {
+    let response = json!({
+        "affected_rows": 1,
+        "last_insert_id": null,
+        "returned_rows": [{
+            "oversized": false,
+            "memory_type": "context-type-private-sentinel",
+            "title": "context-title-private-sentinel",
+            "content": "context-content-private-sentinel",
+            "concepts": ["context-concept-private-sentinel"],
+            "candidate_bytes": "128"
+        }]
+    });
+    let expected = ExpectedInvocation {
+        payload: json!({
+            "db": DATABASE_TARGET,
+            "sql": SEARCH_CONTEXT_SQL,
+            "params": ["3", "4096"]
+        }),
+        reply: Reply::Result(response),
+    };
+    let session = FakeSession::start(vec![expected]).await?;
+    let database = IiiMemoryDatabase::new(session.client.clone(), database_target()?);
+    let store = MemoryContextStore::new(database);
+    let result = store
+        .list_recent(ContextQuery {
+            limit: 3,
+            max_candidate_bytes: 4096,
+        })
+        .await;
+    drop(store);
+    session.finish().await?;
+    let result = result.map_err(|_| VerificationError)?;
+    let [ContextCandidate::Memory(memory)] = result.as_slice() else {
+        return verification_failure();
+    };
+    require(memory.memory_type == "context-type-private-sentinel")?;
+    require(memory.title == "context-title-private-sentinel")?;
+    require(memory.content == "context-content-private-sentinel")?;
+    require(memory.concepts == ["context-concept-private-sentinel"])
+}
+
+async fn verify_context_terminal_outcomes() -> VerificationResult {
+    let cases = [
+        (
+            "empty",
+            json!({"affected_rows":0,"last_insert_id":null,"returned_rows":[]}),
+            0usize,
+        ),
+        (
+            "oversized",
+            json!({"affected_rows":1,"last_insert_id":null,"returned_rows":[{"oversized":true,"memory_type":null,"title":null,"content":null,"concepts":null,"candidate_bytes":"5000"}]}),
+            1usize,
+        ),
+    ];
+    for (_name, response, expected_len) in cases {
+        let result = invoke_context_reply(Reply::Result(response), 4096, 3000).await?;
+        let candidates = result.map_err(|_| VerificationError)?;
+        require(candidates.len() == expected_len)?;
+        if expected_len == 1 {
+            require(matches!(
+                candidates.as_slice(),
+                [ContextCandidate::Oversized]
+            ))?;
+        }
+    }
+    let malformed = invoke_context_reply(
+        Reply::Result(json!({"affected_rows":1,"last_insert_id":SQL_SENTINEL,"returned_rows":[]})),
+        4096,
+        3000,
+    )
+    .await?;
+    let error = malformed.err().ok_or(VerificationError)?;
+    assert_database_error_is_opaque(&error)?;
+
+    let remote = invoke_context_reply(Reply::RemoteFailure, 4096, 3000).await?;
+    let error = remote.err().ok_or(VerificationError)?;
+    require(error == DatabaseError::database_failure(DatabaseOperation::SearchContext))?;
+    assert_database_error_is_opaque(&error)?;
+
+    let timeout_error = invoke_context_reply(
+        Reply::DelayedResult(
+            json!({"affected_rows":0,"last_insert_id":null,"returned_rows":[]}),
+            Duration::from_millis(50),
+        ),
+        4096,
+        10,
+    )
+    .await?;
+    let error = timeout_error.err().ok_or(VerificationError)?;
+    require(error == DatabaseError::database_failure(DatabaseOperation::SearchContext))?;
+    assert_database_error_is_opaque(&error)
+}
+
+async fn invoke_context_reply(
+    reply: Reply,
+    candidate_bytes: usize,
+    timeout_ms: u64,
+) -> VerificationResult<Result<Vec<ContextCandidate>, DatabaseError>> {
+    let expected = ExpectedInvocation {
+        payload: json!({"db":DATABASE_TARGET,"sql":SEARCH_CONTEXT_SQL,"params":["3",candidate_bytes.to_string()]}),
+        reply,
+    };
+    let session = FakeSession::start(vec![expected]).await?;
+    let database = IiiMemoryDatabase::new(session.client.clone(), database_target()?)
+        .with_context_timeout_ms(timeout_ms);
+    let query = ValidatedContextQuery::try_from(ContextQuery {
+        limit: 3,
+        max_candidate_bytes: candidate_bytes,
+    })
+    .map_err(|_| VerificationError)?;
+    let result = database.list_recent_context(&query).await;
+    drop(database);
+    session.finish().await?;
+    Ok(result)
 }
 
 async fn verify_compliant_operations() -> VerificationResult {
@@ -549,6 +702,20 @@ async fn send_reply(
     invocation_id: &str,
     reply: Reply,
 ) -> VerificationResult {
+    if let Reply::DelayedResult(result, delay) = &reply {
+        sleep(*delay).await;
+        let _ = send_protocol_message(
+            socket,
+            json!({
+                "type": "invocationresult",
+                "invocation_id": invocation_id,
+                "function_id": DATABASE_EXECUTE_FUNCTION_ID,
+                "result": result,
+            }),
+        )
+        .await;
+        return Ok(());
+    }
     let response = match reply {
         Reply::Result(result) => json!({
             "type": "invocationresult",
@@ -566,6 +733,7 @@ async fn send_reply(
                 "stacktrace": REMOTE_STACKTRACE,
             },
         }),
+        Reply::DelayedResult(_, _) => return verification_failure(),
     };
     send_protocol_message(socket, response).await
 }
@@ -1017,14 +1185,24 @@ fn verification_failure<T>() -> VerificationResult<T> {
 #[cfg(test)]
 mod tests {
     use super::{
-        verify_compliant_operations, verify_malformed_responses_are_typed_and_opaque,
-        verify_protocol_rejections_are_strict, verify_remote_failures_are_typed_and_opaque,
-        verify_write_outcomes_are_typed_and_opaque,
+        verify_compliant_operations, verify_context_operation, verify_context_terminal_outcomes,
+        verify_malformed_responses_are_typed_and_opaque, verify_protocol_rejections_are_strict,
+        verify_remote_failures_are_typed_and_opaque, verify_write_outcomes_are_typed_and_opaque,
     };
 
     #[tokio::test]
     async fn loopback_protocol_verifies_all_four_adapter_operations() {
         assert!(verify_compliant_operations().await.is_ok());
+    }
+
+    #[tokio::test]
+    async fn loopback_protocol_verifies_context_sql_and_narrow_rows() {
+        assert!(verify_context_operation().await.is_ok());
+    }
+
+    #[tokio::test]
+    async fn loopback_protocol_verifies_context_empty_oversized_malformed_and_deadline() {
+        assert!(verify_context_terminal_outcomes().await.is_ok());
     }
 
     #[tokio::test]

@@ -10,15 +10,19 @@ use rust_mcp_schema::{
 };
 use serde::de::DeserializeOwned;
 use serde_json::{Map, Value, json};
+use std::sync::Arc;
 
 use crate::{
     contracts::{
-        GetExactInput, GetLatestInput, ListVersionsInput, MemorySearchInput, SaveInput,
-        tool_registry,
+        GetExactInput, GetLatestInput, ListVersionsInput, MemoryContextInput, MemorySearchInput,
+        SaveInput, tool_registry,
     },
     embedding::QueryEmbeddingGenerator,
     operations::MemoryOperations,
-    service::{CreateContext, MemoryToolService},
+    service::{
+        CreateContext, MemoryToolService, StartupContextOperations, StartupContextService,
+        ToolError,
+    },
 };
 
 const SERVER_NAME: &str = "total-recall-mcp";
@@ -52,6 +56,25 @@ where
     G: QueryEmbeddingGenerator,
 {
     service: MemoryToolService<O, C, G>,
+    context: Option<Arc<dyn ContextToolCall>>,
+}
+
+#[async_trait::async_trait]
+trait ContextToolCall: Send + Sync {
+    async fn call(
+        &self,
+        input: MemoryContextInput,
+    ) -> Result<crate::contracts::MemoryContextOutput, ToolError>;
+}
+
+#[async_trait::async_trait]
+impl<S: StartupContextOperations + 'static> ContextToolCall for StartupContextService<S> {
+    async fn call(
+        &self,
+        input: MemoryContextInput,
+    ) -> Result<crate::contracts::MemoryContextOutput, ToolError> {
+        self.context(input).await
+    }
 }
 
 impl<O, C, G> McpServer<O, C, G>
@@ -61,7 +84,18 @@ where
     G: QueryEmbeddingGenerator,
 {
     pub fn new(service: MemoryToolService<O, C, G>) -> Self {
-        Self { service }
+        Self {
+            service,
+            context: None,
+        }
+    }
+
+    pub fn with_startup_context<S: StartupContextOperations + 'static>(
+        mut self,
+        context: StartupContextService<S>,
+    ) -> Self {
+        self.context = Some(Arc::new(context));
+        self
     }
 
     pub fn discover(&self, request: DiscoverRequest) -> DiscoverResultResponse {
@@ -160,6 +194,19 @@ where
                         }),
                     ),
                     Err(error) => tool_error_response(id, error.code()),
+                },
+                Err(()) => tool_error_response(id, "invalid_input"),
+            },
+            "memory_context" => match decode_arguments::<MemoryContextInput>(arguments) {
+                Ok(input) => match self.context.as_ref() {
+                    Some(context) => match context.call(input).await {
+                        Ok(output) => match serde_json::to_value(output) {
+                            Ok(output) => tool_success_response(id, &tool_name, output),
+                            Err(_) => tool_error_response(id, "internal_failure"),
+                        },
+                        Err(error) => tool_error_response(id, error.code()),
+                    },
+                    None => tool_error_response(id, "backend_failure"),
                 },
                 Err(()) => tool_error_response(id, "invalid_input"),
             },

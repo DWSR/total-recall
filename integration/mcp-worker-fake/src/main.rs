@@ -284,6 +284,35 @@ JOIN public.memories AS memory
     ON memory.id = head.id
    AND memory.version = head.version
 WHERE head.id = $1::text"#;
+const SEARCH_CONTEXT_SQL: &str = r#"WITH bounded_heads AS MATERIALIZED (
+    SELECT head.id, head.version, head.updated_at
+    FROM public.memory_search_heads AS head
+    ORDER BY head.updated_at DESC, head.id COLLATE "C" ASC, head.version DESC
+    LIMIT $1::text::bigint
+), sized_candidates AS MATERIALIZED (
+    SELECT bounded_heads.updated_at, bounded_heads.id, bounded_heads.version,
+           memory.type AS memory_type, memory.title, memory.content, memory.concepts,
+           octet_length(json_build_object('type', memory.type, 'title', memory.title,
+               'content', memory.content, 'concepts', memory.concepts)::text) AS candidate_bytes,
+           row_number() OVER (ORDER BY bounded_heads.updated_at DESC,
+               bounded_heads.id COLLATE "C" ASC, bounded_heads.version DESC) AS candidate_position
+    FROM bounded_heads
+    JOIN public.memories AS memory ON memory.id = bounded_heads.id AND memory.version = bounded_heads.version
+), candidates AS MATERIALIZED (
+    SELECT sized_candidates.*,
+           min(candidate_position) FILTER (WHERE candidate_bytes > $2::text::numeric) OVER ()
+               AS first_oversized_position
+    FROM sized_candidates
+)
+SELECT CASE WHEN candidate_bytes > $2::text::numeric THEN true ELSE false END AS oversized,
+       CASE WHEN candidate_bytes > $2::text::numeric THEN NULL ELSE memory_type END AS memory_type,
+       CASE WHEN candidate_bytes > $2::text::numeric THEN NULL ELSE title END AS title,
+       CASE WHEN candidate_bytes > $2::text::numeric THEN NULL ELSE content END AS content,
+       CASE WHEN candidate_bytes > $2::text::numeric THEN NULL ELSE to_json(concepts) END AS concepts,
+       candidate_bytes::text AS candidate_bytes
+FROM candidates
+WHERE first_oversized_position IS NULL OR candidate_position <= first_oversized_position
+ORDER BY updated_at DESC, id COLLATE "C" ASC, version DESC"#;
 
 type FakeResult<T = ()> = Result<T, ProcessClientError>;
 
@@ -358,6 +387,11 @@ impl WorkerInvocation {
                 "TOTAL_RECALL_MCP_MAX_IN_FLIGHT",
                 bounds.max_in_flight.to_string(),
             )
+            .env("TOTAL_RECALL_MCP_CONTEXT_DEFAULT_LIMIT", "10")
+            .env("TOTAL_RECALL_MCP_CONTEXT_MAX_LIMIT", "20")
+            .env("TOTAL_RECALL_MCP_CONTEXT_MAX_RESULT_BYTES", "32768")
+            .env("TOTAL_RECALL_MCP_CONTEXT_TIMEOUT_MS", "5000")
+            .env("TOTAL_RECALL_MCP_CONTEXT_DATABASE_TIMEOUT_MS", "3000")
             .env("III_URL", iii_url)
             .env_remove("III_WORKER_NAME")
             .env_remove("III_NAMESPACE")
@@ -534,6 +568,17 @@ enum RetrievalOperation {
     Latest,
 }
 
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum ContextEngineMode {
+    Success,
+    Empty,
+    Oversized,
+    Malformed,
+    BackendFailure,
+    DatabaseTimeout,
+    NoDatabaseInvocation,
+}
+
 impl RetrievalEngineMode {
     const fn operation(self) -> Option<RetrievalOperation> {
         match self {
@@ -572,6 +617,7 @@ enum FakeDatabaseEngineMode {
     Search(SearchEngineMode),
     VersionList(VersionListEngineMode),
     Retrieval(RetrievalEngineMode),
+    Context(ContextEngineMode),
 }
 
 #[derive(Clone, Copy)]
@@ -626,6 +672,7 @@ enum EngineCompletion {
     FailedSearchInvocations(CapturedFailedSearchInvocations),
     VersionListInvocation(CapturedDatabaseInvocation),
     RetrievalInvocation(CapturedDatabaseInvocation),
+    ContextInvocation(CapturedDatabaseInvocation),
     NoDatabaseInvocation,
 }
 
@@ -655,6 +702,7 @@ impl FakeDatabaseEngine {
                 | FakeDatabaseEngineMode::Search(SearchEngineMode::NoDatabaseInvocation)
                 | FakeDatabaseEngineMode::VersionList(VersionListEngineMode::NoDatabaseInvocation)
                 | FakeDatabaseEngineMode::Retrieval(RetrievalEngineMode::NoDatabaseInvocation,)
+                | FakeDatabaseEngineMode::Context(ContextEngineMode::NoDatabaseInvocation)
         ) {
             let (sender, receiver) = oneshot::channel();
             (Some(sender), Some(receiver))
@@ -993,6 +1041,7 @@ async fn run_protocol_scenarios(executable: PathBuf, limits: ProcessLimits) -> F
     assert_memory_save_flows(&executable, limits).await?;
     assert_memory_version_list_flows(&executable, limits).await?;
     assert_memory_retrieval_flows(&executable, limits).await?;
+    assert_memory_context_flows(&executable, limits).await?;
     assert_memory_search_flows(&executable, limits).await?;
     Ok(())
 }
@@ -1346,6 +1395,225 @@ async fn assert_memory_retrieval_flows(executable: &Path, limits: ProcessLimits)
         "backend_failure",
     )
     .await
+}
+
+async fn assert_memory_context_flows(executable: &Path, limits: ProcessLimits) -> FakeResult {
+    for (mode, id) in [
+        (ContextEngineMode::Success, "context-success"),
+        (ContextEngineMode::Empty, "context-empty"),
+        (ContextEngineMode::Oversized, "context-oversized"),
+    ] {
+        let mut engine = FakeDatabaseEngine::start(
+            FakeDatabaseEngineMode::Context(mode),
+            limits.request_timeout,
+        )
+        .await?;
+        let client = match start_worker_with_engine(executable, limits, engine.url()).await {
+            Ok(client) => client,
+            Err(error) => {
+                engine.abort_and_wait().await;
+                return Err(error);
+            }
+        };
+        engine.wait_until_registered().await?;
+        let mut client = client;
+        let response = client
+            .request(&tool_request(id, "memory_context", json!({"limit": 10})))
+            .await?;
+        let (stderr, completion) = stop_memory_save_scenario(client, engine).await?;
+        let EngineCompletion::ContextInvocation(invocation) = completion else {
+            return Err(ProcessClientError::ProtocolScenario(
+                "memory context did not invoke the database",
+            ));
+        };
+        require(
+            invocation.database == SMOKE_DATABASE_TARGET,
+            "memory context used the wrong database",
+        )?;
+        require(
+            invocation.sql == SEARCH_CONTEXT_SQL
+                && invocation.params == [json!("10"), json!("32768")],
+            "memory context query contract mismatch",
+        )?;
+        assert_empty_stderr(&stderr)?;
+        let memories = response["result"]["structuredContent"]["memories"]
+            .as_array()
+            .ok_or(ProcessClientError::ProtocolScenario(
+                "memory context omitted structured memories",
+            ))?;
+        match mode {
+            ContextEngineMode::Success => {
+                let structured = response["result"]["structuredContent"].as_object().ok_or(
+                    ProcessClientError::ProtocolScenario(
+                        "memory context omitted structured content",
+                    ),
+                )?;
+                require(
+                    has_exact_keys(structured, &["memories"]),
+                    "memory context returned unexpected structured fields",
+                )?;
+                require(
+                    memories.len() == 1
+                        && memories[0]
+                            == json!({"type":"context-type-private-sentinel","title":"context-title-private-sentinel","content":"context-content-private-sentinel","concepts":["context-concept-private-sentinel"]}),
+                    "memory context returned a non-narrow record",
+                )?;
+                for forbidden in [
+                    "id",
+                    "version",
+                    "files",
+                    "session_ids",
+                    "updated_at",
+                    "embedding",
+                ] {
+                    require(
+                        memories[0].get(forbidden).is_none(),
+                        "memory context exposed provenance",
+                    )?;
+                }
+            }
+            ContextEngineMode::Empty | ContextEngineMode::Oversized => require(
+                memories.is_empty(),
+                "empty or oversized context was not empty",
+            )?,
+            _ => unreachable!(),
+        }
+    }
+    for (mode, id, error_code) in [
+        (
+            ContextEngineMode::Malformed,
+            "context-malformed",
+            "internal_failure",
+        ),
+        (
+            ContextEngineMode::BackendFailure,
+            "context-backend-failure",
+            "backend_failure",
+        ),
+    ] {
+        let mut engine = FakeDatabaseEngine::start(
+            FakeDatabaseEngineMode::Context(mode),
+            limits.request_timeout,
+        )
+        .await?;
+        let mut client = start_worker_with_engine(executable, limits, engine.url()).await?;
+        engine.wait_until_registered().await?;
+        let response = client
+            .request(&tool_request(id, "memory_context", json!({})))
+            .await?;
+        let (stderr, completion) = stop_memory_save_scenario(client, engine).await?;
+        require(
+            matches!(completion, EngineCompletion::ContextInvocation(_)),
+            "context failure scenario missed its database invocation",
+        )?;
+        let actual_error = response["result"]["content"][0]["text"]
+            .as_str()
+            .unwrap_or("");
+        require(
+            actual_error == error_code,
+            "context failure returned an unexpected fixed error code",
+        )?;
+        require(
+            response["result"]["isError"] == true,
+            "context backend/malformed response was not marked as an error",
+        )?;
+        assert_protected_values_absent(&response)?;
+        assert_context_values_absent(&response.to_string())?;
+        assert_empty_stderr(&stderr)?;
+    }
+    let mut engine = FakeDatabaseEngine::start(
+        FakeDatabaseEngineMode::Context(ContextEngineMode::DatabaseTimeout),
+        limits.request_timeout,
+    )
+    .await?;
+    let mut client = start_worker_with_engine(executable, limits, engine.url()).await?;
+    engine.wait_until_registered().await?;
+    let response = client
+        .request(&tool_request(
+            "context-database-timeout",
+            "memory_context",
+            json!({}),
+        ))
+        .await?;
+    let (stderr, completion) = stop_memory_save_scenario(client, engine).await?;
+    require(
+        matches!(completion, EngineCompletion::ContextInvocation(_)),
+        "context database deadline did not capture exactly one operation",
+    )?;
+    assert_tool_error(&response, "context-database-timeout", "backend_failure")?;
+    assert_protected_values_absent(&response)?;
+    assert_context_values_absent(&response.to_string())?;
+    assert_empty_stderr(&stderr)?;
+
+    let mut engine = FakeDatabaseEngine::start(
+        FakeDatabaseEngineMode::Context(ContextEngineMode::NoDatabaseInvocation),
+        limits.request_timeout,
+    )
+    .await?;
+    let mut client = start_worker_with_engine(executable, limits, engine.url()).await?;
+    engine.wait_until_registered().await?;
+    for (id, args) in [
+        (
+            "context-unknown-field",
+            json!({"unexpected": "context-private-sentinel"}),
+        ),
+        (
+            "context-query-field",
+            json!({"query": "context-private-sentinel"}),
+        ),
+        ("context-null-limit", json!({"limit": null})),
+        ("context-invalid-limit", json!({"limit": 0})),
+        ("context-too-large-limit", json!({"limit": 51})),
+    ] {
+        let response = client
+            .request(&tool_request(id, "memory_context", args))
+            .await?;
+        require(
+            response["result"]["content"][0]["text"] == "invalid_input",
+            "context invalid request returned an unexpected error code",
+        )?;
+        require(
+            response["result"]["isError"] == true,
+            "context invalid request was not marked as an error",
+        )?;
+        assert_protected_values_absent(&response)?;
+        assert_context_values_absent(&response.to_string())?;
+    }
+    engine.wait_until_no_database_invocation().await?;
+    let (stderr, completion) = stop_memory_save_scenario(client, engine).await?;
+    require(
+        matches!(completion, EngineCompletion::NoDatabaseInvocation),
+        "invalid context request reached database",
+    )?;
+    assert_empty_stderr(&stderr)
+}
+
+fn context_row(oversized: bool) -> Value {
+    if oversized {
+        json!({"oversized":true,"memory_type":null,"title":null,"content":null,"concepts":null,"candidate_bytes":"40000"})
+    } else {
+        json!({"oversized":false,"memory_type":"context-type-private-sentinel","title":"context-title-private-sentinel","content":"context-content-private-sentinel","concepts":["context-concept-private-sentinel"],"candidate_bytes":"128"})
+    }
+}
+
+fn assert_context_values_absent(output: &str) -> FakeResult {
+    require(
+        [
+            "context-type-private-sentinel",
+            "context-title-private-sentinel",
+            "context-content-private-sentinel",
+            "context-concept-private-sentinel",
+            "context-database-private-sentinel",
+            "context-private-sentinel",
+            "malformed-context-private-sentinel",
+            ENGINE_ERROR_CODE_SENTINEL,
+            ENGINE_ERROR_MESSAGE_SENTINEL,
+            ENGINE_ERROR_STACKTRACE_SENTINEL,
+        ]
+        .iter()
+        .all(|sentinel| !output.contains(sentinel)),
+        "memory context response leaked a protected value",
+    )
 }
 
 async fn assert_successful_memory_retrieval(
@@ -2020,7 +2288,8 @@ async fn run_fake_database_engine(
         FakeDatabaseEngineMode::Save(SaveEngineMode::NoDatabaseInvocation)
         | FakeDatabaseEngineMode::Search(SearchEngineMode::NoDatabaseInvocation)
         | FakeDatabaseEngineMode::VersionList(VersionListEngineMode::NoDatabaseInvocation)
-        | FakeDatabaseEngineMode::Retrieval(RetrievalEngineMode::NoDatabaseInvocation) => {
+        | FakeDatabaseEngineMode::Retrieval(RetrievalEngineMode::NoDatabaseInvocation)
+        | FakeDatabaseEngineMode::Context(ContextEngineMode::NoDatabaseInvocation) => {
             complete_no_database_invocation(&mut socket, no_database_invocation, timeout_duration)
                 .await
         }
@@ -2076,6 +2345,51 @@ async fn run_fake_database_engine(
             send_retrieval_database_reply(&mut socket, mode, &invocation_id).await?;
             wait_for_engine_disconnect(&mut socket, timeout_duration).await?;
             Ok(EngineCompletion::RetrievalInvocation(invocation))
+        }
+        FakeDatabaseEngineMode::Context(mode) => {
+            let (invocation_id, invocation) =
+                capture_database_invocation(&mut socket, timeout_duration).await?;
+            require(
+                invocation.sql == SEARCH_CONTEXT_SQL,
+                "memory context did not use its static bounded query",
+            )?;
+            require(
+                invocation.params == [json!("10"), json!("32768")],
+                "memory context used incorrect positional bounds",
+            )?;
+            let result = match mode {
+                ContextEngineMode::Success => {
+                    json!({"affected_rows":1,"last_insert_id":null,"returned_rows":[context_row(false)]})
+                }
+                ContextEngineMode::Empty => {
+                    json!({"affected_rows":0,"last_insert_id":null,"returned_rows":[]})
+                }
+                ContextEngineMode::Oversized => {
+                    json!({"affected_rows":1,"last_insert_id":null,"returned_rows":[context_row(true)]})
+                }
+                ContextEngineMode::Malformed => {
+                    json!({"affected_rows":1,"last_insert_id":null,"returned_rows":[{"oversized":false,"memory_type":null,"title":"malformed-context-private-sentinel","content":"x","concepts":[],"candidate_bytes":"1"}]})
+                }
+                ContextEngineMode::BackendFailure => {
+                    send_engine_message(&mut socket, json!({"type":"invocationresult","invocation_id":invocation_id,"function_id":DATABASE_EXECUTE_FUNCTION_ID,"error":{"code":ENGINE_ERROR_CODE_SENTINEL,"message":ENGINE_ERROR_MESSAGE_SENTINEL,"stacktrace":ENGINE_ERROR_STACKTRACE_SENTINEL}})).await?;
+                    wait_for_engine_disconnect(&mut socket, timeout_duration).await?;
+                    return Ok(EngineCompletion::ContextInvocation(invocation));
+                }
+                ContextEngineMode::DatabaseTimeout => {
+                    tokio::time::sleep(Duration::from_secs(4)).await;
+                    let _ = send_engine_message(&mut socket, json!({"type":"invocationresult","invocation_id":invocation_id,"function_id":DATABASE_EXECUTE_FUNCTION_ID,"result":{"affected_rows":0,"last_insert_id":null,"returned_rows":[]}})).await;
+                    wait_for_engine_disconnect(&mut socket, timeout_duration).await?;
+                    return Ok(EngineCompletion::ContextInvocation(invocation));
+                }
+                ContextEngineMode::NoDatabaseInvocation => {
+                    return Err(ProcessClientError::ProtocolScenario(
+                        "context no-invocation mode received database call",
+                    ));
+                }
+            };
+            send_engine_message(&mut socket, json!({"type":"invocationresult","invocation_id":invocation_id,"function_id":DATABASE_EXECUTE_FUNCTION_ID,"result":result})).await?;
+            wait_for_engine_disconnect(&mut socket, timeout_duration).await?;
+            Ok(EngineCompletion::ContextInvocation(invocation))
         }
     }
 }
@@ -3614,7 +3928,7 @@ fn assert_tool_registry_response(response: &Value, id: &str) -> FakeResult {
                     "ttlMs": 0,
                 },
             }),
-        "tools/list response did not advertise the exact five-tool schema registry",
+        "tools/list response did not advertise the exact six-tool schema registry",
     )
 }
 
@@ -4616,7 +4930,34 @@ fn expected_tool_registry() -> Value {
                 &["versions", "next_offset"],
             ),
         ),
+        tool(
+            "memory_context",
+            object_schema(
+                json!({
+                    "limit": { "type": "integer", "minimum": 1, "maximum": 50 },
+                }),
+                &[],
+            ),
+            object_schema(
+                json!({
+                    "memories": { "type": "array", "items": context_memory_schema() },
+                }),
+                &["memories"],
+            ),
+        ),
     ])
+}
+
+fn context_memory_schema() -> Value {
+    object_schema(
+        json!({
+            "type": { "type": "string" },
+            "title": { "type": "string" },
+            "content": { "type": "string" },
+            "concepts": { "type": "array", "items": { "type": "string" } },
+        }),
+        &["type", "title", "content", "concepts"],
+    )
 }
 
 fn tool(name: &str, input_schema: Value, output_schema: Value) -> Value {
@@ -5326,9 +5667,10 @@ where
 #[cfg(test)]
 mod tests {
     use super::{
-        BoundedLine, CapturedStderr, ChildProcessClient, FLOOD_PRESSURE_NOT_OBSERVED,
-        MAX_RAW_TEST_LINE_BYTES, PressureObservedWriter, ProcessClientError, ProcessLimits,
-        RequestFlood, parse_arguments, read_bounded_line,
+        BoundedLine, CapturedStderr, ChildProcessClient, DEFAULT_WORKER_BOUNDS,
+        FLOOD_PRESSURE_NOT_OBSERVED, MAX_RAW_TEST_LINE_BYTES, PressureObservedWriter,
+        ProcessClientError, ProcessLimits, RequestFlood, WorkerInvocation, expected_tool_registry,
+        parse_arguments, read_bounded_line,
     };
     use serde_json::json;
     use std::{io, time::Duration};
@@ -5374,6 +5716,110 @@ mod tests {
             .unwrap_err();
 
             assert!(matches!(error, ProcessClientError::InvalidArguments(_)));
+        }
+    }
+
+    #[test]
+    fn worker_launch_and_registry_cover_the_context_contract() {
+        let command = WorkerInvocation {
+            executable: "/tmp/mcp-worker".into(),
+        }
+        .command(DEFAULT_WORKER_BOUNDS);
+        let environment = command
+            .as_std()
+            .get_envs()
+            .map(|(key, value)| {
+                (
+                    key.to_string_lossy().into_owned(),
+                    value.map(|value| value.to_string_lossy().into_owned()),
+                )
+            })
+            .collect::<std::collections::BTreeMap<_, _>>();
+
+        for (key, expected) in [
+            ("TOTAL_RECALL_MCP_CONTEXT_DEFAULT_LIMIT", "10"),
+            ("TOTAL_RECALL_MCP_CONTEXT_MAX_LIMIT", "20"),
+            ("TOTAL_RECALL_MCP_CONTEXT_MAX_RESULT_BYTES", "32768"),
+            ("TOTAL_RECALL_MCP_CONTEXT_TIMEOUT_MS", "5000"),
+            ("TOTAL_RECALL_MCP_CONTEXT_DATABASE_TIMEOUT_MS", "3000"),
+        ] {
+            assert_eq!(
+                environment.get(key).and_then(Option::as_deref),
+                Some(expected)
+            );
+        }
+
+        let context_settings = environment
+            .keys()
+            .filter(|key| key.starts_with("TOTAL_RECALL_MCP_CONTEXT_"))
+            .collect::<Vec<_>>();
+        assert_eq!(
+            context_settings.len(),
+            5,
+            "every context launch setting must be explicit"
+        );
+
+        let tools = expected_tool_registry();
+        let tools = tools.as_array().expect("registry should be an array");
+        assert_eq!(tools.len(), 6);
+        assert_eq!(tools[5]["name"], "memory_context");
+        assert_eq!(tools[5]["inputSchema"]["additionalProperties"], false);
+        assert_eq!(tools[5]["inputSchema"]["required"], json!([]));
+        assert_eq!(
+            tools[5]["inputSchema"]["properties"],
+            json!({
+                "limit": { "type": "integer", "minimum": 1, "maximum": 50 }
+            })
+        );
+        assert_eq!(tools[5]["outputSchema"]["additionalProperties"], false);
+        assert_eq!(tools[5]["outputSchema"]["required"], json!(["memories"]));
+        assert_eq!(
+            tools[5]["outputSchema"]["properties"]["memories"]["items"]["properties"],
+            json!({
+                "type": { "type": "string" },
+                "title": { "type": "string" },
+                "content": { "type": "string" },
+                "concepts": { "type": "array", "items": { "type": "string" } }
+            })
+        );
+        assert_eq!(
+            tools[5]["outputSchema"]["properties"]["memories"]["items"]["required"],
+            json!(["type", "title", "content", "concepts"])
+        );
+        let readme = include_str!("../README.md");
+        let worker_readme = include_str!("../../../workers/mcp-worker/README.md");
+        for (key, default) in [
+            ("TOTAL_RECALL_MCP_CONTEXT_DEFAULT_LIMIT", "`10`"),
+            ("TOTAL_RECALL_MCP_CONTEXT_MAX_LIMIT", "`20`"),
+            ("TOTAL_RECALL_MCP_CONTEXT_MAX_RESULT_BYTES", "`32768`"),
+            ("TOTAL_RECALL_MCP_CONTEXT_TIMEOUT_MS", "`5000`"),
+            ("TOTAL_RECALL_MCP_CONTEXT_DATABASE_TIMEOUT_MS", "`3000`"),
+        ] {
+            assert!(
+                worker_readme.contains(key),
+                "worker settings table is missing {key}"
+            );
+            assert!(
+                worker_readme.contains(default),
+                "worker settings table is missing default {default}"
+            );
+        }
+        for contract in [
+            "count `10`",
+            "count `20`",
+            "bytes `32768`",
+            "timeout `5000`",
+            "timeout `3000`",
+            "narrow success, empty rows, the",
+            "field-free oversized sentinel",
+            "malformed rows, opaque backend failure",
+            "explicit `null`",
+            "delayed SDK-deadline outcomes",
+        ] {
+            assert!(
+                readme.contains(contract),
+                "fake README is missing executable contract {contract}"
+            );
         }
     }
 

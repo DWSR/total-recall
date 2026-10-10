@@ -1,8 +1,7 @@
 use async_trait::async_trait;
 
 use crate::contracts::{
-    ContextCandidate, ContextQuery, DatabaseError, DatabaseOperation, MemoryStoreError,
-    ValidatedContextQuery,
+    ContextCandidate, ContextQuery, DatabaseError, MemoryStoreError, ValidatedContextQuery,
 };
 
 #[async_trait]
@@ -27,13 +26,6 @@ impl<D: MemoryContextDatabase> MemoryContextStore<D> {
         query: ContextQuery,
     ) -> Result<Vec<ContextCandidate>, MemoryStoreError> {
         let query = ValidatedContextQuery::try_from(query)?;
-        self.database
-            .list_recent_context(&query)
-            .await
-            .map_err(|_| {
-                MemoryStoreError::Database(DatabaseError::database_failure(
-                    DatabaseOperation::SearchContext,
-                ))
-            })
+        Ok(self.database.list_recent_context(&query).await?)
     }
 }

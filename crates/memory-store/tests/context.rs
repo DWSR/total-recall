@@ -66,6 +66,22 @@ impl MemoryContextDatabase for FailingDatabase {
     }
 }
 
+#[derive(Clone, Default)]
+struct InvalidResponseDatabase;
+
+#[async_trait]
+impl MemoryContextDatabase for InvalidResponseDatabase {
+    async fn list_recent_context(
+        &self,
+        _: &ValidatedContextQuery,
+    ) -> Result<Vec<ContextCandidate>, DatabaseError> {
+        Err(DatabaseError::invalid_response(
+            DatabaseOperation::SearchContext,
+            "memory_type",
+        ))
+    }
+}
+
 fn query(limit: u32, bytes: usize) -> ContextQuery {
     ContextQuery {
         limit,
@@ -113,4 +129,16 @@ async fn context_database_failure_is_opaque_and_testable() {
     assert_eq!(database.calls(), 1);
     assert!(!error.to_string().contains(protected));
     assert!(!format!("{error:?}").contains(protected));
+}
+
+#[tokio::test]
+async fn context_invalid_database_response_preserves_its_classification() {
+    let store = MemoryContextStore::new(InvalidResponseDatabase);
+    assert!(matches!(
+        store.list_recent(query(2, 128)).await,
+        Err(MemoryStoreError::Database(DatabaseError::InvalidResponse {
+            operation: DatabaseOperation::SearchContext,
+            column: "memory_type",
+        }))
+    ));
 }
