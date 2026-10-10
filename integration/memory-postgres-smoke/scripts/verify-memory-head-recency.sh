@@ -1,7 +1,7 @@
 #!/usr/bin/env bash
 set -euo pipefail
 
-for variable in MEMORY_POSTGRES_BIN MEMORY_POSTGRES_SOCKET_DIR MEMORY_POSTGRES_DATABASE MEMORY_POSTGRES_MIGRATION_ROLE MEMORY_POSTGRES_APPLICATION_ROLE MEMORY_POSTGRES_EXPECTED_MAJOR MEMORY_SCHEMA_MIGRATION MEMORY_RECENCY_MIGRATION PGPORT; do
+for variable in MEMORY_POSTGRES_BIN MEMORY_POSTGRES_SOCKET_DIR MEMORY_POSTGRES_DATABASE MEMORY_POSTGRES_MIGRATION_ROLE MEMORY_POSTGRES_APPLICATION_ROLE MEMORY_POSTGRES_EXPECTED_MAJOR MEMORY_SCHEMA_MIGRATION MEMORY_RECENCY_MIGRATION MEMORY_RECENCY_INDEX_MIGRATION PGPORT; do
 	if [[ -z "${!variable:-}" ]]; then
 		printf 'missing fixture environment variable: %s\n' "$variable" >&2
 		exit 64
@@ -75,4 +75,28 @@ expect "$(query "$application_role" "SELECT version||'|'||(updated_at AT TIME ZO
 query "$application_role" "INSERT INTO public.memories (id,version,type,title,content,created_at,updated_at,concepts,files,session_ids,source_observation_ids) VALUES ('recency-a',2,'fact','a2','old',TIMESTAMPTZ '2026-01-09 00:00:00+00',TIMESTAMPTZ '2026-01-10 00:00:00+00',ARRAY[]::text[],ARRAY[]::text[],ARRAY[]::text[],ARRAY[]::text[])" >/dev/null
 expect "$(query "$application_role" "SELECT version||'|'||(updated_at AT TIME ZONE 'UTC')::text FROM public.memory_search_heads WHERE id='recency-a'")" '4|2026-01-08 00:00:00' 'lower version does not advance recency'
 
-printf 'PostgreSQL %s memory head recency migration=atomic backfill=exact-head privileges=preserved old-reader=compatible lock-timeout=rollback statement-timeout=rollback\n' "$MEMORY_POSTGRES_EXPECTED_MAJOR"
+# Writers resume after transactional 0002 and before standalone 0003.
+query "$application_role" "INSERT INTO public.memories (id,version,type,title,content,created_at,updated_at,concepts,files,session_ids,source_observation_ids) VALUES ('recency-c',1,'fact','c1','writer resumed',TIMESTAMPTZ '2026-01-11 00:00:00+00',TIMESTAMPTZ '2026-01-12 00:00:00+00',ARRAY[]::text[],ARRAY[]::text[],ARRAY[]::text[],ARRAY[]::text[])" >/dev/null
+expect "$(query "$application_role" "SELECT version FROM public.memory_search_heads WHERE id='recency-c'")" '1' 'writer remains available after 0002'
+
+# Cause a real concurrent build failure while evaluating an indexed expression;
+# PostgreSQL leaves its catalog entry invalid for explicit concurrent cleanup.
+query "$migration_role" "CREATE FUNCTION public.memory_recency_index_failure(TIMESTAMPTZ) RETURNS TIMESTAMPTZ LANGUAGE plpgsql IMMUTABLE AS \$\$ BEGIN RAISE EXCEPTION 'forced index build failure'; END; \$\$" >/dev/null
+if query "$migration_role" "CREATE INDEX CONCURRENTLY memory_search_heads_context_recency_idx ON public.memory_search_heads (public.memory_recency_index_failure(updated_at))" >/dev/null 2>&1; then
+	fail 'forced concurrent index build unexpectedly succeeded'
+fi
+expect "$(query "$migration_role" "SELECT indisvalid FROM pg_index WHERE indexrelid='public.memory_search_heads_context_recency_idx'::regclass")" 'f' 'failed concurrent build leaves invalid index'
+query "$migration_role" 'DROP INDEX CONCURRENTLY public.memory_search_heads_context_recency_idx' >/dev/null
+query "$migration_role" 'DROP FUNCTION public.memory_recency_index_failure(TIMESTAMPTZ)' >/dev/null
+
+# The ordered migration is standalone (not wrapped in a transaction) and can be
+# retried after invalid-index cleanup while application writers remain active.
+"$psql" --no-psqlrc --no-password --host="$MEMORY_POSTGRES_SOCKET_DIR" --port="$PGPORT" \
+	--username="$migration_role" --dbname="$db" --set=ON_ERROR_STOP=1 \
+	--file="$MEMORY_RECENCY_INDEX_MIGRATION" >/dev/null
+query "$application_role" "INSERT INTO public.memories (id,version,type,title,content,created_at,updated_at,concepts,files,session_ids,source_observation_ids) VALUES ('recency-d',1,'fact','d1','writer during index-ready state',TIMESTAMPTZ '2026-01-13 00:00:00+00',TIMESTAMPTZ '2026-01-14 00:00:00+00',ARRAY[]::text[],ARRAY[]::text[],ARRAY[]::text[],ARRAY[]::text[])" >/dev/null
+expect "$(query "$migration_role" "SELECT indisvalid||'|'||pg_get_indexdef(indexrelid) FROM pg_index WHERE indexrelid='public.memory_search_heads_context_recency_idx'::regclass")" \
+	'true|CREATE INDEX memory_search_heads_context_recency_idx ON public.memory_search_heads USING btree (updated_at DESC, id COLLATE "C", version DESC)' 'ordered concurrent index is valid'
+expect "$(query "$application_role" "SELECT version FROM public.memory_search_heads WHERE id='recency-d'")" '1' 'writer remains available after concurrent index build'
+
+printf 'PostgreSQL %s memory head recency migration=atomic backfill=exact-head privileges=preserved old-reader=compatible lock-timeout=rollback statement-timeout=rollback concurrent-index=recovered writers=available\n' "$MEMORY_POSTGRES_EXPECTED_MAJOR"

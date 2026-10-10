@@ -134,6 +134,7 @@
             ];
             MEMORY_SCHEMA_MIGRATION = "${./crates/memory-store/migrations/0001_memory_schema_search.sql}";
             MEMORY_RECENCY_MIGRATION = "${./crates/memory-store/migrations/0002_memory_search_head_recency.sql}";
+            MEMORY_RECENCY_INDEX_MIGRATION = "${./crates/memory-store/migrations/0003_memory_context_recency_index.sql}";
           }
           ''
             ${pkgs.bash}/bin/bash \

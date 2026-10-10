@@ -8,7 +8,7 @@
   - Completion is observable when the verifier proves successful atomic application, preserved table/function privileges and old-reader queries, and an unchanged baseline after both timeout failures.
   - _Requirements: 1.1, 1.2_
   - _Boundary: Head Recency Projection, PostgreSQL Verification_
-- [ ] 1.2 Add the concurrent recency index path
+- [x] 1.2 Add the concurrent recency index path
   - Add the standalone ordered B-tree build with the approved update-time, bytewise identity, and version order.
   - Support non-transactional application and explicit recovery from an invalid concurrent index without weakening the transactional migration path.
   - Completion is observable when a failed build can be repaired and the valid index is available without blocking resumed memory writers.
