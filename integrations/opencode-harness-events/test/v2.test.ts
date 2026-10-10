@@ -16,14 +16,20 @@ import {
 } from "../src/v2";
 import { createSessionRuntime, type SessionRuntime } from "../src/runtime";
 import type { Diagnostic, JsonObject, Submission } from "../src/model";
+import type { FrozenSnapshot } from "../src/context-format";
+import type { StartupContextRuntime } from "../src/context-runtime";
 
 const NATIVE_CREATED_MS = Date.parse("2026-09-20T12:34:56.789Z");
 const CLOCK_MS = Date.parse("2026-09-20T13:14:15.016Z");
 const SESSION_ID = "session-v2";
+const CHILD_SESSION_ID = "session-v2-child";
 const CONTEXT_DIRECTORY = "/context/project";
 const EVENT_DIRECTORY = "/event/session";
 const OPAQUE_NUMBER = 7;
 const CLEANUP_SETTLEMENT_MICROTASK_TURNS = 4;
+const STARTUP_MEMORY_TEXT = "startup-memory-secret";
+const OTHER_STARTUP_MEMORY_TEXT = "other-session-startup-memory-secret";
+const HOST_SYSTEM_TEXT = "host-instructions";
 
 function context(
   directory = CONTEXT_DIRECTORY,
@@ -91,10 +97,54 @@ function finiteSubscription(events: readonly unknown[]): V2Subscribe {
   });
 }
 
+function textSnapshot(text: string): FrozenSnapshot {
+  return { kind: "text", text };
+}
+
+interface ContextRuntimeRecorder {
+  readonly runtime: StartupContextRuntime;
+  readonly resolveCalls: string[];
+  readonly removeCalls: string[];
+  readonly closes: number[];
+}
+
+function contextRuntimeRecorder(
+  resolveImpl: (sessionId: string) => Promise<FrozenSnapshot> = () =>
+    Promise.resolve(textSnapshot(STARTUP_MEMORY_TEXT)),
+): ContextRuntimeRecorder {
+  const resolveCalls: string[] = [];
+  const removeCalls: string[] = [];
+  const closes: number[] = [];
+  const runtime: StartupContextRuntime = {
+    resolve: (sessionId) => {
+      resolveCalls.push(sessionId);
+      return resolveImpl(sessionId);
+    },
+    remove: (sessionId) => {
+      removeCalls.push(sessionId);
+    },
+    close: () => {
+      closes.push(1);
+      return Promise.resolve();
+    },
+  };
+
+  return { runtime, resolveCalls, removeCalls, closes };
+}
+
+function contextDependencies(
+  runtime: SessionRuntime,
+  contextRuntime: StartupContextRuntime,
+  report: (diagnostic: Diagnostic) => void = () => undefined,
+): V2AdapterDependencies {
+  return { ...dependencies(runtime, report), context: contextRuntime };
+}
+
 interface HookFixture {
   readonly context: V2Context;
   readonly callbacks: ReadonlyMap<string, V2HookCallback>;
   readonly registrationCalls: string[];
+  readonly sessionHookNames: string[];
   readonly disposalOrder: string[];
 }
 
@@ -109,6 +159,7 @@ function hookFixture(
 ): HookFixture {
   const callbacks = new Map<string, V2HookCallback>();
   const registrationCalls: string[] = [];
+  const sessionHookNames: string[] = [];
   const disposalOrder: string[] = [];
   const failRegistrations = options.failRegistrations ?? new Set<string>();
   const failDisposals = options.failDisposals ?? new Set<string>();
@@ -136,8 +187,10 @@ function hookFixture(
   };
 
   const session = {
-    hook: (name: "prompt", callback: V2HookCallback) =>
-      register(`session.${name}`, callback),
+    hook: (name: "prompt" | "context", callback: V2HookCallback) => {
+      sessionHookNames.push(name);
+      return register(`session.${name}`, callback);
+    },
   };
   const tool = {
     hook: (
@@ -150,6 +203,7 @@ function hookFixture(
     context: context(directory, subscribe, { session, tool }),
     callbacks,
     registrationCalls,
+    sessionHookNames,
     disposalOrder,
   };
 }
@@ -825,6 +879,7 @@ test("registers and forwards v2 prompt and tool hooks as opaque observations", a
 
   expect(fixture.registrationCalls).toEqual([
     "session.prompt",
+    "session.context",
     "tool.execute.before",
     "tool.execute.after",
   ]);
@@ -1004,11 +1059,19 @@ test("contains registration failures and disposes successful registrations befor
 
   expect(fixture.registrationCalls).toEqual([
     "session.prompt",
+    "session.context",
     "tool.execute.before",
     "tool.execute.after",
   ]);
-  expect(fixture.disposalOrder).toEqual(["dispose:tool.execute.before"]);
-  expect(order).toEqual(["dispose:tool.execute.before", "runtime.close"]);
+  expect(fixture.disposalOrder).toEqual([
+    "dispose:session.context",
+    "dispose:tool.execute.before",
+  ]);
+  expect(order).toEqual([
+    "dispose:session.context",
+    "dispose:tool.execute.before",
+    "runtime.close",
+  ]);
   expect(closeCount).toBe(1);
 });
 
@@ -1068,6 +1131,7 @@ test("aborts the subscription, disposes hooks, and closes the runtime once in or
   expect(order).toEqual([
     "subscription.aborted",
     "dispose:session.prompt",
+    "dispose:session.context",
     "dispose:tool.execute.before",
     "dispose:tool.execute.after",
     "runtime.close",
@@ -1141,11 +1205,13 @@ test("cleans up without waiting for an abort-ignoring subscription and ignores i
 
     expect(fixture.disposalOrder).toEqual([
       "dispose:session.prompt",
+      "dispose:session.context",
       "dispose:tool.execute.before",
       "dispose:tool.execute.after",
     ]);
     expect(order).toEqual([
       "dispose:session.prompt",
+      "dispose:session.context",
       "dispose:tool.execute.before",
       "dispose:tool.execute.after",
       "runtime.close",
@@ -1160,4 +1226,473 @@ test("cleans up without waiting for an abort-ignoring subscription and ignores i
   }
 
   expect(observationCount).toBe(0);
+});
+
+test("registers exactly the prompt and primary context session hooks with tool hooks", async () => {
+  const recording = recordingRuntime();
+  const fixture = hookFixture();
+  const contextRuntime = contextRuntimeRecorder();
+  const cleanup = await setupV2(
+    fixture.context,
+    contextDependencies(recording.runtime, contextRuntime.runtime),
+  );
+
+  expect(fixture.sessionHookNames).toEqual(["prompt", "context"]);
+  expect(fixture.registrationCalls).toEqual([
+    "session.prompt",
+    "session.context",
+    "tool.execute.before",
+    "tool.execute.after",
+  ]);
+
+  await expect(cleanup()).resolves.toBeUndefined();
+});
+
+test("appends one byte-stable text system part and preserves prior system content", async () => {
+  const recording = recordingRuntime();
+  const fixture = hookFixture();
+  const contextRuntime = contextRuntimeRecorder();
+  const cleanup = await setupV2(
+    fixture.context,
+    contextDependencies(recording.runtime, contextRuntime.runtime),
+  );
+
+  const firstSystem: Array<{ type: string; text: string }> = [
+    { type: "text", text: HOST_SYSTEM_TEXT },
+  ];
+  const secondSystem: Array<{ type: string; text: string }> = [];
+  await expect(
+    invokeHook(fixture.callbacks, "session.context", {
+      sessionID: SESSION_ID,
+      system: firstSystem,
+    }),
+  ).resolves.toBeUndefined();
+  await expect(
+    invokeHook(fixture.callbacks, "session.context", {
+      sessionID: SESSION_ID,
+      system: secondSystem,
+    }),
+  ).resolves.toBeUndefined();
+
+  expect(firstSystem).toEqual([
+    { type: "text", text: HOST_SYSTEM_TEXT },
+    { type: "text", text: STARTUP_MEMORY_TEXT },
+  ]);
+  expect(secondSystem).toEqual([{ type: "text", text: STARTUP_MEMORY_TEXT }]);
+  expect(contextRuntime.resolveCalls).toEqual([SESSION_ID, SESSION_ID]);
+
+  await expect(cleanup()).resolves.toBeUndefined();
+});
+
+test("contributes no system content when the frozen snapshot is empty", async () => {
+  const recording = recordingRuntime();
+  const fixture = hookFixture();
+  const contextRuntime = contextRuntimeRecorder(() =>
+    Promise.resolve({ kind: "empty" }),
+  );
+  const cleanup = await setupV2(
+    fixture.context,
+    contextDependencies(recording.runtime, contextRuntime.runtime),
+  );
+
+  const system: Array<{ type: string; text: string }> = [
+    { type: "text", text: HOST_SYSTEM_TEXT },
+  ];
+  await expect(
+    invokeHook(fixture.callbacks, "session.context", {
+      sessionID: SESSION_ID,
+      system,
+    }),
+  ).resolves.toBeUndefined();
+
+  expect(system).toEqual([{ type: "text", text: HOST_SYSTEM_TEXT }]);
+  expect(contextRuntime.resolveCalls).toEqual([SESSION_ID]);
+
+  await expect(cleanup()).resolves.toBeUndefined();
+});
+
+test("performs no lookup or mutation without an explicit session identity", async () => {
+  const recording = recordingRuntime();
+  const fixture = hookFixture();
+  const contextRuntime = contextRuntimeRecorder();
+  const diagnostics: Diagnostic[] = [];
+  const cleanup = await setupV2(
+    fixture.context,
+    contextDependencies(
+      recording.runtime,
+      contextRuntime.runtime,
+      (diagnostic) => diagnostics.push(diagnostic),
+    ),
+  );
+
+  const blankSystem: Array<{ type: string; text: string }> = [
+    { type: "text", text: HOST_SYSTEM_TEXT },
+  ];
+  const missingInputs: readonly unknown[] = [
+    null,
+    undefined,
+    [],
+    {},
+    { system: [] },
+    { sessionID: 7, system: [] },
+    { sessionID: null, system: [] },
+    { sessionID: "   ", system: blankSystem },
+  ];
+  for (const input of missingInputs) {
+    await expect(
+      invokeHook(fixture.callbacks, "session.context", input),
+    ).resolves.toBeUndefined();
+  }
+
+  const controlSystem: Array<{ type: string; text: string }> = [];
+  await expect(
+    invokeHook(fixture.callbacks, "session.context", {
+      sessionID: SESSION_ID,
+      system: controlSystem,
+    }),
+  ).resolves.toBeUndefined();
+
+  expect(blankSystem).toEqual([{ type: "text", text: HOST_SYSTEM_TEXT }]);
+  expect(contextRuntime.resolveCalls).toEqual([SESSION_ID]);
+  expect(diagnostics).toEqual([]);
+  expect(recording.submissions).toEqual([]);
+
+  await expect(cleanup()).resolves.toBeUndefined();
+});
+
+test("appends nothing when no context runtime dependency is injected", async () => {
+  const recording = recordingRuntime();
+  const fixture = hookFixture();
+  const cleanup = await setupV2(
+    fixture.context,
+    dependencies(recording.runtime),
+  );
+
+  const system: Array<{ type: string; text: string }> = [
+    { type: "text", text: HOST_SYSTEM_TEXT },
+  ];
+  await expect(
+    invokeHook(fixture.callbacks, "session.context", {
+      sessionID: SESSION_ID,
+      system,
+    }),
+  ).resolves.toBeUndefined();
+
+  expect(system).toEqual([{ type: "text", text: HOST_SYSTEM_TEXT }]);
+
+  await expect(cleanup()).resolves.toBeUndefined();
+});
+
+test("injects each session's own frozen snapshot for separate identities", async () => {
+  const recording = recordingRuntime();
+  const fixture = hookFixture();
+  const contextRuntime = contextRuntimeRecorder((sessionId) => {
+    if (sessionId === SESSION_ID) {
+      return Promise.resolve(textSnapshot(STARTUP_MEMORY_TEXT));
+    }
+    return Promise.resolve(textSnapshot(OTHER_STARTUP_MEMORY_TEXT));
+  });
+  const cleanup = await setupV2(
+    fixture.context,
+    contextDependencies(recording.runtime, contextRuntime.runtime),
+  );
+
+  const parentSystem: Array<{ type: string; text: string }> = [];
+  const childSystem: Array<{ type: string; text: string }> = [];
+  await expect(
+    invokeHook(fixture.callbacks, "session.context", {
+      sessionID: SESSION_ID,
+      system: parentSystem,
+    }),
+  ).resolves.toBeUndefined();
+  await expect(
+    invokeHook(fixture.callbacks, "session.context", {
+      sessionID: CHILD_SESSION_ID,
+      system: childSystem,
+    }),
+  ).resolves.toBeUndefined();
+
+  expect(parentSystem).toEqual([{ type: "text", text: STARTUP_MEMORY_TEXT }]);
+  expect(childSystem).toEqual([
+    { type: "text", text: OTHER_STARTUP_MEMORY_TEXT },
+  ]);
+  expect(contextRuntime.resolveCalls).toEqual([SESSION_ID, CHILD_SESSION_ID]);
+
+  await expect(cleanup()).resolves.toBeUndefined();
+});
+
+test("injects byte-identical content for repeated and concurrent context hooks", async () => {
+  const recording = recordingRuntime();
+  const fixture = hookFixture();
+  let shared: Promise<FrozenSnapshot> | undefined;
+  const contextRuntime = contextRuntimeRecorder(() => {
+    shared ??= Promise.resolve(textSnapshot(STARTUP_MEMORY_TEXT));
+    return shared;
+  });
+  const cleanup = await setupV2(
+    fixture.context,
+    contextDependencies(recording.runtime, contextRuntime.runtime),
+  );
+
+  const repeatedSystem: Array<{ type: string; text: string }> = [];
+  await expect(
+    invokeHook(fixture.callbacks, "session.context", {
+      sessionID: SESSION_ID,
+      system: repeatedSystem,
+    }),
+  ).resolves.toBeUndefined();
+
+  const concurrentOne: Array<{ type: string; text: string }> = [];
+  const concurrentTwo: Array<{ type: string; text: string }> = [];
+  await Promise.all([
+    invokeHook(fixture.callbacks, "session.context", {
+      sessionID: SESSION_ID,
+      system: concurrentOne,
+    }),
+    invokeHook(fixture.callbacks, "session.context", {
+      sessionID: SESSION_ID,
+      system: concurrentTwo,
+    }),
+  ]);
+
+  const appended = [{ type: "text", text: STARTUP_MEMORY_TEXT }];
+  expect(repeatedSystem).toEqual(appended);
+  expect(concurrentOne).toEqual(appended);
+  expect(concurrentTwo).toEqual(appended);
+
+  await expect(cleanup()).resolves.toBeUndefined();
+});
+
+test("removes context state when a deleted session is captured", async () => {
+  const recording = recordingRuntime();
+  const contextRuntime = contextRuntimeRecorder();
+  const cleanup = await setupV2(
+    context(
+      CONTEXT_DIRECTORY,
+      finiteSubscription([
+        nativeEvent("session.created", eventData()),
+        nativeEvent("session.deleted", eventData()),
+      ]),
+    ),
+    contextDependencies(recording.runtime, contextRuntime.runtime),
+  );
+
+  await settleSubscription();
+  await expect(cleanup()).resolves.toBeUndefined();
+
+  expect(contextRuntime.removeCalls).toEqual([SESSION_ID]);
+  expect(recording.submissions.map((submission) => submission.kind)).toEqual([
+    "start",
+    "observation",
+    "observation",
+    "end",
+  ]);
+});
+
+test("still removes context state and ends the session when capture fails on deletion", async () => {
+  const diagnostics: Diagnostic[] = [];
+  let endCount = 0;
+  const runtime: SessionRuntime = {
+    start: () => undefined,
+    observe: () => {
+      throw new Error("runtime-secret");
+    },
+    end: () => {
+      endCount += 1;
+    },
+    close: async () => undefined,
+  };
+  const contextRuntime = contextRuntimeRecorder();
+  const cleanup = await setupV2(
+    context(
+      CONTEXT_DIRECTORY,
+      finiteSubscription([nativeEvent("session.deleted", eventData())]),
+    ),
+    contextDependencies(runtime, contextRuntime.runtime, (diagnostic) =>
+      diagnostics.push(diagnostic),
+    ),
+  );
+
+  await settleSubscription();
+  await expect(cleanup()).resolves.toBeUndefined();
+
+  expect(contextRuntime.removeCalls).toEqual([SESSION_ID]);
+  expect(endCount).toBe(1);
+  expect(diagnostics).toEqual([
+    {
+      category: "serialization",
+      generation: "v2",
+      nativeKind: "session.deleted",
+      sessionId: SESSION_ID,
+    },
+  ]);
+  expect(JSON.stringify(diagnostics)).not.toContain("runtime-secret");
+});
+
+test("never captures injected startup-memory content as a submitted observation", async () => {
+  const recording = recordingRuntime();
+  const fixture = hookFixture(
+    finiteSubscription([
+      nativeEvent("session.created", eventData()),
+      nativeEvent("session.execution.started", eventData()),
+    ]),
+  );
+  const contextRuntime = contextRuntimeRecorder();
+  const cleanup = await setupV2(
+    fixture.context,
+    contextDependencies(recording.runtime, contextRuntime.runtime),
+  );
+  await settleSubscription();
+
+  await invokeHook(fixture.callbacks, "session.prompt", {
+    sessionID: SESSION_ID,
+    prompt: { text: "prompt-content" },
+  });
+  const injectedSystem: Array<{ type: string; text: string }> = [
+    { type: "text", text: HOST_SYSTEM_TEXT },
+  ];
+  await invokeHook(fixture.callbacks, "session.context", {
+    sessionID: SESSION_ID,
+    system: injectedSystem,
+  });
+  await invokeHook(fixture.callbacks, "tool.execute.after", {
+    tool: "read",
+    sessionID: SESSION_ID,
+    status: "completed",
+    result: { title: "read result", output: "tool-output" },
+  });
+  await expect(cleanup()).resolves.toBeUndefined();
+
+  expect(injectedSystem).toEqual([
+    { type: "text", text: HOST_SYSTEM_TEXT },
+    { type: "text", text: STARTUP_MEMORY_TEXT },
+  ]);
+  expect(
+    observations(recording.submissions).map(
+      (observation) => observation.hookType,
+    ),
+  ).toEqual([
+    "opencode.v2.session.created",
+    "opencode.v2.session.execution.started",
+    "opencode.v2.session.prompt",
+    "opencode.v2.tool.execute.after",
+  ]);
+  const serialized = JSON.stringify(observations(recording.submissions));
+  expect(serialized).not.toContain("startup-memory");
+  expect(serialized).toContain("prompt-content");
+});
+
+test("keeps the context runtime open and context hooks inert after disposal", async () => {
+  const recording = recordingRuntime();
+  const fixture = hookFixture();
+  const contextRuntime = contextRuntimeRecorder();
+  const cleanup = await setupV2(
+    fixture.context,
+    contextDependencies(recording.runtime, contextRuntime.runtime),
+  );
+
+  const beforeSystem: Array<{ type: string; text: string }> = [];
+  await invokeHook(fixture.callbacks, "session.context", {
+    sessionID: SESSION_ID,
+    system: beforeSystem,
+  });
+
+  await expect(cleanup()).resolves.toBeUndefined();
+  expect(contextRuntime.closes).toEqual([]);
+  expect(fixture.disposalOrder).toEqual([
+    "dispose:session.prompt",
+    "dispose:session.context",
+    "dispose:tool.execute.before",
+    "dispose:tool.execute.after",
+  ]);
+
+  const afterSystem: Array<{ type: string; text: string }> = [
+    { type: "text", text: HOST_SYSTEM_TEXT },
+  ];
+  await expect(
+    invokeHook(fixture.callbacks, "session.context", {
+      sessionID: SESSION_ID,
+      system: afterSystem,
+    }),
+  ).resolves.toBeUndefined();
+
+  expect(beforeSystem).toEqual([{ type: "text", text: STARTUP_MEMORY_TEXT }]);
+  expect(afterSystem).toEqual([{ type: "text", text: HOST_SYSTEM_TEXT }]);
+  expect(contextRuntime.resolveCalls).toEqual([SESSION_ID]);
+  expect(contextRuntime.closes).toEqual([]);
+});
+
+test("contains context lookup failures without appending or leaking content", async () => {
+  const recording = recordingRuntime();
+  const fixture = hookFixture();
+  const diagnostics: Diagnostic[] = [];
+  const contextRuntime = contextRuntimeRecorder(() =>
+    Promise.reject(new Error("context-lookup-secret")),
+  );
+  const cleanup = await setupV2(
+    fixture.context,
+    contextDependencies(
+      recording.runtime,
+      contextRuntime.runtime,
+      (diagnostic) => diagnostics.push(diagnostic),
+    ),
+  );
+
+  const system: Array<{ type: string; text: string }> = [
+    { type: "text", text: HOST_SYSTEM_TEXT },
+  ];
+  await expect(
+    invokeHook(fixture.callbacks, "session.context", {
+      sessionID: SESSION_ID,
+      system,
+    }),
+  ).resolves.toBeUndefined();
+  await expect(cleanup()).resolves.toBeUndefined();
+
+  expect(system).toEqual([{ type: "text", text: HOST_SYSTEM_TEXT }]);
+  expect(diagnostics).toEqual([
+    {
+      category: "serialization",
+      generation: "v2",
+      nativeKind: "session.context",
+      sessionId: SESSION_ID,
+    },
+  ]);
+  expect(JSON.stringify(diagnostics)).not.toContain("context-lookup-secret");
+  expect(JSON.stringify(diagnostics)).not.toContain("startup-memory");
+  expect(recording.submissions).toEqual([]);
+});
+
+test("reports a non-array context system payload without a lookup", async () => {
+  const recording = recordingRuntime();
+  const fixture = hookFixture();
+  const diagnostics: Diagnostic[] = [];
+  const contextRuntime = contextRuntimeRecorder();
+  const cleanup = await setupV2(
+    fixture.context,
+    contextDependencies(
+      recording.runtime,
+      contextRuntime.runtime,
+      (diagnostic) => diagnostics.push(diagnostic),
+    ),
+  );
+
+  await expect(
+    invokeHook(fixture.callbacks, "session.context", {
+      sessionID: SESSION_ID,
+      system: "not-array",
+    }),
+  ).resolves.toBeUndefined();
+
+  expect(contextRuntime.resolveCalls).toEqual([]);
+  expect(diagnostics).toEqual([
+    {
+      category: "serialization",
+      generation: "v2",
+      nativeKind: "session.context",
+      sessionId: SESSION_ID,
+    },
+  ]);
+
+  await expect(cleanup()).resolves.toBeUndefined();
 });

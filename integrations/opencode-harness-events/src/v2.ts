@@ -15,6 +15,7 @@ import type {
   Submission,
 } from "./model";
 import type { SessionRuntime } from "./runtime";
+import type { StartupContextRuntime } from "./context-runtime";
 
 export interface V2Context {
   readonly location: {
@@ -44,7 +45,7 @@ export interface V2Registration {
 export type V2HookCallback = (input: unknown) => Promise<void> | void;
 
 export type V2SessionHook = (
-  name: "prompt",
+  name: "prompt" | "context",
   callback: V2HookCallback,
 ) => Promise<V2Registration>;
 
@@ -63,6 +64,7 @@ export type V2Subscribe = (
 
 export interface V2AdapterDependencies {
   readonly runtime: SessionRuntime;
+  readonly context?: StartupContextRuntime;
   readonly report: (diagnostic: Diagnostic) => void;
   readonly now: () => Date;
   readonly subscribe?: V2Subscribe;
@@ -84,6 +86,8 @@ type AcceptedHookKind =
   | "session.prompt"
   | "tool.execute.before"
   | "tool.execute.after";
+
+const CONTEXT_HOOK_KIND = "session.context";
 
 interface UnknownRecord {
   readonly [key: string]: unknown;
@@ -452,6 +456,44 @@ function handleHook(
   }
 }
 
+async function handleContextHook(
+  dependencies: V2AdapterDependencies,
+  hookInput: unknown,
+): Promise<void> {
+  let sessionId: string | undefined;
+
+  try {
+    if (!isRecord(hookInput)) {
+      return;
+    }
+
+    sessionId = usableString(hookInput["sessionID"]);
+    if (sessionId === undefined) {
+      return;
+    }
+
+    const system = hookInput["system"];
+    if (!Array.isArray(system)) {
+      reportSerialization(dependencies, CONTEXT_HOOK_KIND, sessionId);
+      return;
+    }
+
+    const { context } = dependencies;
+    if (context === undefined) {
+      return;
+    }
+
+    const snapshot = await context.resolve(sessionId);
+    if (snapshot.kind !== "text") {
+      return;
+    }
+
+    system.push({ type: "text", text: snapshot.text });
+  } catch {
+    reportSerialization(dependencies, CONTEXT_HOOK_KIND, sessionId);
+  }
+}
+
 function isAcceptedNativeKind(value: string): value is AcceptedNativeKind {
   return ACCEPTED_NATIVE_KINDS.has(value);
 }
@@ -524,6 +566,7 @@ function handleEvent(
           dependencies.runtime.observe(eventObservation);
         } finally {
           sessionDirectories.delete(details.sessionId);
+          dependencies.context?.remove(details.sessionId);
           dependencies.runtime.end(eventMetadata);
         }
         break;
@@ -597,6 +640,16 @@ function createHook(
   };
 }
 
+function createContextHook(state: V2AdapterState): V2HookCallback {
+  return (hookInput) => {
+    if (state.stopped) {
+      return;
+    }
+
+    return handleContextHook(state.dependencies, hookInput);
+  };
+}
+
 async function registerOne(
   state: V2AdapterState,
   register: () => Promise<unknown>,
@@ -629,6 +682,9 @@ async function registerOne(
 async function registerHooks(state: V2AdapterState): Promise<void> {
   await registerOne(state, () =>
     state.context.session.hook("prompt", createHook(state, "session.prompt")),
+  );
+  await registerOne(state, () =>
+    state.context.session.hook("context", createContextHook(state)),
   );
   await registerOne(state, () =>
     state.context.tool.hook(

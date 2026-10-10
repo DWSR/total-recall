@@ -124,7 +124,7 @@
   - _Depends: 3.8_
   - _Requirements: 5.1, 5.10, 5.11, 5.12, 5.13, 5.14, 6.3, 6.4, 6.5, 6.6, 6.9, 7.1, 7.4, 7.5_
   - _Boundary: V1 Adapter_
-- [ ] 4.2 (P) Add OpenCode v2 primary-context injection
+- [x] 4.2 (P) Add OpenCode v2 primary-context injection
   - Register only the pinned primary context hook and append one text system part for an explicit session identity.
   - Leave title, summary, compaction, and generation hooks without startup context while preserving existing prompt, tool, event, deletion, and cleanup behavior.
   - Completion is observable when v2 tests prove exact registration, primary-only stable bytes, separate sessions, state removal, unchanged capture, and no startup-memory observation.
