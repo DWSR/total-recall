@@ -61,7 +61,7 @@
   - _Boundary: MCP Context Boundary, Protocol Fakes_
 
 - [ ] 3. Build the OpenCode startup-context core
-- [ ] 3.1 (P) Add opt-in context configuration
+- [x] 3.1 (P) Add opt-in context configuration
   - Parse disabled, invalid, and enabled modes, including absolute binary path, orphan settings, required database target, all positive bounds, and cross-limit consistency.
   - Produce the exact child-environment allowlist and one fixed diagnostic fallback without inheriting ambient capture, provider, proxy, path, home, or credential values.
   - Completion is observable when pure tests cover every mode, default, invalid combination, byte cap, and ambient-environment sentinel with capture configuration unchanged.
