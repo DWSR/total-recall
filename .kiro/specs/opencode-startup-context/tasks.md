@@ -14,7 +14,7 @@
   - Completion is observable when a failed build can be repaired and the valid index is available without blocking resumed memory writers.
   - _Requirements: 1.2_
   - _Boundary: Head Recency Projection_
-- [ ] 1.3 (P) Define the narrow context read boundary
+- [x] 1.3 (P) Define the narrow context read boundary
   - Add validated count and candidate-byte inputs plus narrow type, title, content, and concepts records and the terminal oversized sentinel.
   - Keep database effects behind a focused read port with recording and failing test doubles and protected-value-safe errors.
   - Completion is observable when invalid inputs make no database call and every valid or failing candidate outcome is independently testable.

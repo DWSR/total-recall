@@ -75,6 +75,66 @@ pub struct VectorSearch {
     pub limit: u32,
 }
 
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct ContextQuery {
+    pub limit: u32,
+    pub max_candidate_bytes: usize,
+}
+
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct ContextMemory {
+    pub memory_type: String,
+    pub title: String,
+    pub content: String,
+    pub concepts: Vec<String>,
+}
+
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub enum ContextCandidate {
+    Memory(ContextMemory),
+    Oversized,
+}
+
+pub const MAX_CONTEXT_LIMIT: u32 = 50;
+
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct ValidatedContextQuery {
+    limit: u32,
+    max_candidate_bytes: usize,
+}
+
+impl ValidatedContextQuery {
+    pub const fn limit(&self) -> u32 {
+        self.limit
+    }
+    pub const fn max_candidate_bytes(&self) -> usize {
+        self.max_candidate_bytes
+    }
+}
+
+impl TryFrom<ContextQuery> for ValidatedContextQuery {
+    type Error = ContractError;
+
+    fn try_from(query: ContextQuery) -> Result<Self, Self::Error> {
+        if query.limit == 0 {
+            return Err(ContractError::invalid("limit", "not_positive"));
+        }
+        if query.limit > MAX_CONTEXT_LIMIT {
+            return Err(ContractError::invalid("limit", "exceeds_maximum"));
+        }
+        if query.max_candidate_bytes == 0 {
+            return Err(ContractError::invalid(
+                "max_candidate_bytes",
+                "not_positive",
+            ));
+        }
+        Ok(Self {
+            limit: query.limit,
+            max_candidate_bytes: query.max_candidate_bytes,
+        })
+    }
+}
+
 #[derive(Clone, Debug, Eq, PartialEq, Serialize)]
 pub struct MemoryId(String);
 
@@ -441,6 +501,7 @@ pub enum DatabaseOperation {
     InsertEmbedding,
     SearchBm25,
     SearchVector,
+    SearchContext,
 }
 
 impl DatabaseOperation {
@@ -450,6 +511,7 @@ impl DatabaseOperation {
             Self::InsertEmbedding => "insert_embedding",
             Self::SearchBm25 => "search_bm25",
             Self::SearchVector => "search_vector",
+            Self::SearchContext => "search_context",
         }
     }
 }
