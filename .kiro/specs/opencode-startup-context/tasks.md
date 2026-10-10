@@ -1,12 +1,13 @@
 # Implementation Plan
 
 - [ ] 1. Establish the indexed memory-context domain
-- [ ] 1.1 Add current-head recency state
+- [ ] 1.1 Add and verify current-head recency state
   - Add the forward transactional change that records the selected canonical memory's update time on each current head.
   - Replace the secured head-maintenance behavior, backfill exact selected versions, validate non-null state, and retain existing privileges and old-reader compatibility under finite migration limits.
-  - Completion is observable when a seeded baseline applies atomically and any lock or statement timeout leaves the baseline unchanged.
+  - Add focused PostgreSQL 17/18 verification for the seeded baseline, exact-version backfill, successful migration, and rollback after forced lock and statement timeouts.
+  - Completion is observable when the verifier proves successful atomic application, preserved table/function privileges and old-reader queries, and an unchanged baseline after both timeout failures.
   - _Requirements: 1.1, 1.2_
-  - _Boundary: Head Recency Projection_
+  - _Boundary: Head Recency Projection, PostgreSQL Verification_
 - [ ] 1.2 Add the concurrent recency index path
   - Add the standalone ordered B-tree build with the approved update-time, bytewise identity, and version order.
   - Support non-transactional application and explicit recovery from an invalid concurrent index without weakening the transactional migration path.
@@ -28,7 +29,7 @@
   - _Boundary: Memory Context Store_
 - [ ] 1.5 Verify migrations and context ordering on PostgreSQL 17 and 18
   - Apply the baseline, transactional recency change, and standalone concurrent index in their required modes with a simulated writer maintenance window.
-  - Exercise exact backfill, greater-version trigger advancement, historical timestamps, deterministic ties, limits, empty state, oversized candidates, privileges, timeout rollback, and invalid-index recovery.
+  - Exercise greater-version trigger advancement, historical timestamps, deterministic ties, limits, empty state, oversized candidates, context-reader access, and invalid-index recovery.
   - Require the populated bounded read to use the recency index without asserting an entire planner shape.
   - Completion is observable when both PostgreSQL majors pass unchanged and existing memory and search behavior remains intact.
   - _Depends: 1.2, 1.4_
