@@ -80,7 +80,7 @@
   - _Depends: 2.1, 3.1_
   - _Requirements: 4.1, 4.2, 4.7, 4.8, 8.3, 8.9, 8.10, 8.11_
   - _Boundary: MCP Client_
-- [ ] 3.4 Implement bounded framing and request correlation
+- [x] 3.4 Implement bounded framing and request correlation
   - Serialize writes with backpressure and decode fragmented or coalesced newline frames under the configured byte cap.
   - Correlate generation-scoped monotonic IDs, validate exact context result fields, allow out-of-order replies, and reject pending saturation, malformed data, partial frames, and unknown live IDs.
   - Completion is observable when protocol tests make each frame, correlation, DTO, and pending-limit outcome deterministic without a real worker.

@@ -5,6 +5,14 @@
 // biome-ignore-all lint/complexity/noExcessiveLinesPerFunction: Startup owns a single bounded child-generation sequence.
 // biome-ignore-all lint/complexity/noExcessiveCognitiveComplexity: Startup owns one ordered readiness and cleanup lifecycle.
 // biome-ignore-all lint/style/noExcessiveLinesPerFile: Startup readiness and owned child streams share one lifecycle boundary.
+// biome-ignore-all lint/style/noMagicNumbers: Wire delimiters and exact DTO field counts are protocol constants.
+// biome-ignore-all lint/complexity/useLiteralKeys: DTO validation operates on untrusted indexed objects.
+// biome-ignore-all lint/style/noParameterProperties: FrameReader captures immutable stream bounds.
+// biome-ignore-all lint/style/useBlockStatements: Early exits keep protocol checks linear.
+// biome-ignore-all lint/style/noContinue: Frame scanning skips non-delimiter bytes.
+// biome-ignore-all lint/style/useExplicitLengthCheck: Empty buffers are explicit protocol states.
+// biome-ignore-all lint/suspicious/noUnnecessaryConditions: Stream EOF is a runtime state transition.
+// biome-ignore-all lint/style/noIncrementDecrement: Sequence numbers are monotonic protocol identifiers.
 import type {
   EnabledContextSettings,
   ResolvedContextConfig,
@@ -25,6 +33,27 @@ interface RpcResponse {
   readonly id?: unknown;
   readonly result?: unknown;
   readonly error?: unknown;
+}
+
+interface ContextMemory {
+  readonly type: string;
+  readonly title: string;
+  readonly content: string;
+  readonly concepts: readonly string[];
+}
+
+function validMemory(value: unknown): value is ContextMemory {
+  if (typeof value !== "object" || value === null || Array.isArray(value))
+    return false;
+  const item = value as Record<string, unknown>;
+  return (
+    Object.keys(item).length === 4 &&
+    typeof item["type"] === "string" &&
+    typeof item["title"] === "string" &&
+    typeof item["content"] === "string" &&
+    Array.isArray(item["concepts"]) &&
+    item["concepts"].every((concept) => typeof concept === "string")
+  );
 }
 
 interface WorkerProcess {
@@ -113,21 +142,57 @@ interface StartupReader {
   releaseLock: () => void;
 }
 
-function readResponse(reader: StartupReader): Promise<RpcResponse> {
-  const decoder = new TextDecoder("utf-8", { fatal: true });
-  let pending = "";
-  return (async () => {
-    let newline = -1;
-    while (newline < 0) {
-      const chunk = await reader.read();
-      if (chunk.done) {
-        throw new Error("worker exited before readiness");
+class FrameReader {
+  private readonly decoder = new TextDecoder("utf-8", { fatal: true });
+  private buffered: number[] = [];
+  private readonly frames: Uint8Array[] = [];
+  private queuedBytes = 0;
+  private ended = false;
+  private reading: Promise<void> | undefined;
+
+  constructor(
+    private readonly reader: StartupReader,
+    private readonly cap: number,
+  ) {}
+
+  async next(): Promise<RpcResponse> {
+    while (this.frames.length === 0) {
+      if (this.ended) throw new Error("partial or closed worker frame");
+      if (this.reading === undefined) {
+        this.reading = this.fill().finally(() => {
+          this.reading = undefined;
+        });
       }
-      pending += decoder.decode(chunk.value, { stream: true });
-      newline = pending.indexOf("\n");
+      await this.reading;
     }
-    return JSON.parse(pending.slice(0, newline)) as RpcResponse;
-  })();
+    const frame = this.frames.shift() as Uint8Array;
+    this.queuedBytes -= frame.length + 1;
+    return JSON.parse(this.decoder.decode(frame)) as RpcResponse;
+  }
+
+  private async fill(): Promise<void> {
+    const chunk = await this.reader.read();
+    if (chunk.done) {
+      this.ended = true;
+      if (this.buffered.length !== 0) throw new Error("partial worker frame");
+      return;
+    }
+    const bytes = chunk.value ?? new Uint8Array();
+    for (const byte of bytes) {
+      if (this.queuedBytes + this.buffered.length + 1 > this.cap)
+        throw new Error("oversized retained worker frames");
+      if (byte === 10) {
+        const { length } = this.buffered;
+        if (length > 0 && this.buffered[length - 1] === 13)
+          throw new Error("invalid worker frame");
+        this.frames.push(Uint8Array.from(this.buffered));
+        this.buffered = [];
+        this.queuedBytes += length + 1;
+      } else {
+        this.buffered.push(byte);
+      }
+    }
+  }
 }
 
 function validDiscovery(result: unknown): boolean {
@@ -178,7 +243,7 @@ function validToolList(result: unknown): boolean {
 
 async function requestReadiness(options: {
   child: WorkerProcess;
-  reader: StartupReader;
+  reader: FrameReader;
   isActive: () => boolean;
   id: string;
   method: string;
@@ -195,11 +260,12 @@ async function requestReadiness(options: {
       },
     },
   };
-  await child.stdin.write(`${JSON.stringify(request)}\n`);
+  const line = `${JSON.stringify(request)}\n`;
+  await child.stdin.write(line);
   if (!isActive()) {
     throw new Error("startup is no longer active");
   }
-  const response = await readResponse(reader);
+  const response = await reader.next();
   if (
     response.jsonrpc !== "2.0" ||
     response.id !== id ||
@@ -218,6 +284,24 @@ export function createContextClient(
   let startup: Promise<{ readonly kind: "ready" } | typeof FAILURE> | undefined;
   let child: WorkerProcess | undefined;
   let stderrDrain: Promise<void> | undefined;
+  let frameReader: FrameReader | undefined;
+  let generation = 0;
+  let sequence = 0;
+  let writeChain: Promise<void> = Promise.resolve();
+  const pending = new Map<
+    string,
+    {
+      resolve: (
+        value:
+          | {
+              readonly kind: "context";
+              readonly memories: readonly ContextMemory[];
+            }
+          | typeof FAILURE,
+      ) => void;
+    }
+  >();
+  let pump: Promise<void> | undefined;
 
   const startEnabled = async (
     settings: EnabledContextSettings,
@@ -246,13 +330,15 @@ export function createContextClient(
       }
       stderrDrain = drain(child.stderr);
       reader = child.stdout.getReader();
+      generation += 1;
+      frameReader = new FrameReader(reader, settings.maxFrameBytes);
       readiness = (async () => {
         if (!active) {
           throw new Error("startup is no longer active");
         }
         const discovery = await requestReadiness({
           child: child as WorkerProcess,
-          reader,
+          reader: frameReader as FrameReader,
           isActive: () => active,
           id: "startup-discover",
           method: "server/discover",
@@ -265,7 +351,7 @@ export function createContextClient(
         }
         const listing = await requestReadiness({
           child: child as WorkerProcess,
-          reader,
+          reader: frameReader as FrameReader,
           isActive: () => active,
           id: "startup-tools",
           method: "tools/list",
@@ -273,7 +359,6 @@ export function createContextClient(
         if (!validToolList(listing.result)) {
           throw new Error("invalid tool schema");
         }
-        reader.releaseLock();
         readerReleased = true;
         return { kind: "ready" } as const;
       })();
@@ -319,6 +404,99 @@ export function createContextClient(
         startup = Promise.resolve(FAILURE);
       }
       return startup;
+    },
+    async request(limit: number): Promise<
+      | {
+          readonly kind: "context";
+          readonly memories: readonly ContextMemory[];
+        }
+      | typeof FAILURE
+    > {
+      if (
+        config.mode !== "enabled" ||
+        !Number.isSafeInteger(limit) ||
+        limit < 1 ||
+        limit > config.settings.limit
+      )
+        return FAILURE;
+      if (await this.start().then((result) => result.kind !== "ready"))
+        return FAILURE;
+      if (
+        pending.size >= config.settings.maxPending ||
+        frameReader === undefined ||
+        child === undefined
+      )
+        return FAILURE;
+      sequence += 1;
+      const id = `${generation}:${sequence}`;
+      const message = JSON.stringify({
+        jsonrpc: "2.0",
+        id,
+        method: "tools/call",
+        params: { name: "memory_context", arguments: { limit } },
+      });
+      const responsePromise = new Promise<
+        | {
+            readonly kind: "context";
+            readonly memories: readonly ContextMemory[];
+          }
+        | typeof FAILURE
+      >((resolve) => pending.set(id, { resolve }));
+      writeChain = writeChain.then(async () => {
+        await child?.stdin.write(`${message}\n`);
+      });
+      writeChain.catch(() => {
+        for (const waiter of pending.values()) waiter.resolve(FAILURE);
+        pending.clear();
+      });
+      if (pump === undefined) {
+        pump = (async () => {
+          try {
+            while (pending.size > 0) {
+              const response = await (frameReader as FrameReader).next();
+              if (
+                response.jsonrpc !== "2.0" ||
+                typeof response.id !== "string" ||
+                !pending.has(response.id)
+              )
+                throw new Error("unknown protocol response");
+              const waiter = pending.get(
+                response.id,
+              ) as typeof pending extends Map<string, infer V> ? V : never;
+              pending.delete(response.id);
+              const memories = (
+                response.result as { memories?: unknown } | undefined
+              )?.memories;
+              const resultValue = response.result;
+              const exactResult =
+                typeof resultValue === "object" &&
+                resultValue !== null &&
+                !Array.isArray(resultValue) &&
+                Object.keys(resultValue).length === 1 &&
+                Object.hasOwn(resultValue, "memories");
+              if (
+                response.error !== undefined ||
+                !exactResult ||
+                !Array.isArray(memories) ||
+                !memories.every((item) => validMemory(item))
+              )
+                waiter.resolve(FAILURE);
+              else
+                waiter.resolve({
+                  kind: "context",
+                  memories: memories as ContextMemory[],
+                });
+            }
+          } catch {
+            for (const waiter of pending.values()) waiter.resolve(FAILURE);
+            pending.clear();
+            child?.kill("SIGKILL");
+          } finally {
+            pump = undefined;
+          }
+        })();
+      }
+      return responsePromise;
     },
     /** Internal observability for lifecycle composition and focused readiness tests. */
     get process(): WorkerProcess | undefined {
