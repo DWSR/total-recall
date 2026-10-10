@@ -67,7 +67,7 @@
   - Completion is observable when pure tests cover every mode, default, invalid combination, byte cap, and ambient-environment sentinel with capture configuration unchanged.
   - _Requirements: 4.1, 4.4, 4.6, 4.8, 8.1, 8.2, 8.9, 8.11_
   - _Boundary: Context Config_
-- [ ] 3.2 (P) Add deterministic context formatting
+- [x] 3.2 (P) Add deterministic context formatting
   - Render typed context records as the fixed untrusted-reference instruction and compact JSON with fixed key order, complete-record preservation, and exact UTF-8 injection bounds.
   - Escape quotes, controls, U+2028, and U+2029 while preserving all other Unicode and record and concept order.
   - Completion is observable when golden tests prove byte identity, structural containment, preserved ordinary Unicode, empty output, overflow-to-empty, and exclusion of provenance fields.
