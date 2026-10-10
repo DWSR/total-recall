@@ -4,13 +4,44 @@ use chrono::{DateTime, Utc};
 use iii_sdk::{IIIClient, protocol::TriggerRequest};
 use serde_json::{Map, Value, json};
 
+use crate::context::MemoryContextDatabase;
 use crate::contracts::{
-    DatabaseError, DatabaseOperation, DatabaseTarget, MemorySearchResult, MemoryVersionInput,
-    MemoryVersionKey, ValidatedBm25Search, ValidatedEmbedding, ValidatedMemoryVersion,
-    ValidatedVectorSearch,
+    ContextCandidate, ContextMemory, DatabaseError, DatabaseOperation, DatabaseTarget,
+    MemorySearchResult, MemoryVersionInput, MemoryVersionKey, ValidatedBm25Search,
+    ValidatedContextQuery, ValidatedEmbedding, ValidatedMemoryVersion, ValidatedVectorSearch,
 };
 
 const DATABASE_EXECUTE_FUNCTION_ID: &str = "database::execute";
+const DEFAULT_CONTEXT_DATABASE_TIMEOUT_MS: u64 = 3_000;
+const SEARCH_CONTEXT_SQL: &str = r#"WITH bounded_heads AS MATERIALIZED (
+    SELECT head.id, head.version, head.updated_at
+    FROM public.memory_search_heads AS head
+    ORDER BY head.updated_at DESC, head.id COLLATE "C" ASC, head.version DESC
+    LIMIT $1::text::bigint
+), sized_candidates AS MATERIALIZED (
+    SELECT bounded_heads.updated_at, bounded_heads.id, bounded_heads.version,
+           memory.type AS memory_type, memory.title, memory.content, memory.concepts,
+           octet_length(json_build_object('type', memory.type, 'title', memory.title,
+               'content', memory.content, 'concepts', memory.concepts)::text) AS candidate_bytes,
+           row_number() OVER (ORDER BY bounded_heads.updated_at DESC,
+               bounded_heads.id COLLATE "C" ASC, bounded_heads.version DESC) AS candidate_position
+    FROM bounded_heads
+    JOIN public.memories AS memory ON memory.id = bounded_heads.id AND memory.version = bounded_heads.version
+), candidates AS MATERIALIZED (
+    SELECT sized_candidates.*,
+           min(candidate_position) FILTER (WHERE candidate_bytes > $2::text::numeric) OVER ()
+               AS first_oversized_position
+    FROM sized_candidates
+)
+SELECT CASE WHEN candidate_bytes > $2::text::numeric THEN true ELSE false END AS oversized,
+       CASE WHEN candidate_bytes > $2::text::numeric THEN NULL ELSE memory_type END AS memory_type,
+       CASE WHEN candidate_bytes > $2::text::numeric THEN NULL ELSE title END AS title,
+       CASE WHEN candidate_bytes > $2::text::numeric THEN NULL ELSE content END AS content,
+       CASE WHEN candidate_bytes > $2::text::numeric THEN NULL ELSE to_json(concepts) END AS concepts,
+       candidate_bytes::text AS candidate_bytes
+FROM candidates
+WHERE first_oversized_position IS NULL OR candidate_position <= first_oversized_position
+ORDER BY updated_at DESC, id COLLATE "C" ASC, version DESC"#;
 const INSERT_MEMORY_SQL: &str = r#"INSERT INTO public.memories (
     id,
     version,
@@ -190,11 +221,31 @@ pub trait MemoryDatabase: Send + Sync {
 pub struct IiiMemoryDatabase {
     client: IIIClient,
     database: DatabaseTarget,
+    context_timeout_ms: u64,
 }
 
 impl IiiMemoryDatabase {
     pub fn new(client: IIIClient, database: DatabaseTarget) -> Self {
-        Self { client, database }
+        Self {
+            client,
+            database,
+            context_timeout_ms: DEFAULT_CONTEXT_DATABASE_TIMEOUT_MS,
+        }
+    }
+
+    pub fn with_context_timeout_ms(mut self, timeout_ms: u64) -> Self {
+        self.context_timeout_ms = timeout_ms;
+        self
+    }
+
+    async fn list_recent_context_impl(
+        &self,
+        query: &ValidatedContextQuery,
+    ) -> Result<Vec<ContextCandidate>, DatabaseError> {
+        list_recent_context_with(&self.database, query, self.context_timeout_ms, |request| {
+            self.client.trigger(request)
+        })
+        .await
     }
 
     #[allow(dead_code)]
@@ -276,6 +327,16 @@ impl MemoryDatabase for IiiMemoryDatabase {
     }
 }
 
+#[async_trait::async_trait]
+impl MemoryContextDatabase for IiiMemoryDatabase {
+    async fn list_recent_context(
+        &self,
+        query: &ValidatedContextQuery,
+    ) -> Result<Vec<ContextCandidate>, DatabaseError> {
+        self.list_recent_context_impl(query).await
+    }
+}
+
 async fn execute<F, Fut>(
     database: &DatabaseTarget,
     operation: DatabaseOperation,
@@ -301,6 +362,160 @@ where
     invoke(request)
         .await
         .map_err(|error| database_failure(operation, error))
+}
+
+async fn execute_with_timeout<F, Fut>(
+    database: &DatabaseTarget,
+    operation: DatabaseOperation,
+    sql: &'static str,
+    params: PositionalParameters,
+    timeout_ms: u64,
+    invoke: F,
+) -> Result<Value, DatabaseError>
+where
+    F: FnOnce(TriggerRequest) -> Fut,
+    Fut: Future<Output = Result<Value, iii_sdk::Error>>,
+{
+    let request = TriggerRequest {
+        function_id: DATABASE_EXECUTE_FUNCTION_ID.to_owned(),
+        payload: json!({
+            "db": database.as_str(),
+            "sql": sql,
+            "params": params.into_json(),
+        }),
+        action: None,
+        timeout_ms: Some(timeout_ms),
+    };
+
+    invoke(request)
+        .await
+        .map_err(|error| database_failure(operation, error))
+}
+
+async fn list_recent_context_with<F, Fut>(
+    database: &DatabaseTarget,
+    query: &ValidatedContextQuery,
+    timeout_ms: u64,
+    invoke: F,
+) -> Result<Vec<ContextCandidate>, DatabaseError>
+where
+    F: FnOnce(TriggerRequest) -> Fut,
+    Fut: Future<Output = Result<Value, iii_sdk::Error>>,
+{
+    let operation = DatabaseOperation::SearchContext;
+    let response = execute_with_timeout(
+        database,
+        operation,
+        SEARCH_CONTEXT_SQL,
+        PositionalParameters::from(vec![
+            json!(query.limit().to_string()),
+            json!(query.max_candidate_bytes().to_string()),
+        ]),
+        timeout_ms,
+        invoke,
+    )
+    .await?;
+
+    decode_context_response(query, response)
+}
+
+fn decode_context_response(
+    query: &ValidatedContextQuery,
+    response: Value,
+) -> Result<Vec<ContextCandidate>, DatabaseError> {
+    let operation = DatabaseOperation::SearchContext;
+    let response = response
+        .as_object()
+        .ok_or_else(|| DatabaseError::invalid_response(operation, "response"))?;
+    let affected_rows = response
+        .get("affected_rows")
+        .and_then(Value::as_u64)
+        .ok_or_else(|| DatabaseError::invalid_response(operation, "affected_rows"))?;
+    match response.get("last_insert_id") {
+        Some(Value::Null) => {}
+        Some(_) => return Err(DatabaseError::invalid_response(operation, "last_insert_id")),
+        None => return Err(DatabaseError::invalid_response(operation, "last_insert_id")),
+    }
+    let rows = response
+        .get("returned_rows")
+        .and_then(Value::as_array)
+        .ok_or_else(|| DatabaseError::invalid_response(operation, "returned_rows"))?;
+    if affected_rows != u64::try_from(rows.len()).unwrap_or(u64::MAX)
+        || affected_rows > u64::from(query.limit())
+    {
+        return Err(DatabaseError::database_failure(operation));
+    }
+
+    let mut candidates = Vec::with_capacity(rows.len());
+    let mut terminal = false;
+    for row in rows {
+        if terminal {
+            return Err(DatabaseError::database_failure(operation));
+        }
+        let row = row
+            .as_object()
+            .ok_or_else(|| DatabaseError::invalid_response(operation, "returned_rows"))?;
+        let oversized = row
+            .get("oversized")
+            .and_then(Value::as_bool)
+            .ok_or_else(|| DatabaseError::invalid_response(operation, "oversized"))?;
+        let byte_count = row
+            .get("candidate_bytes")
+            .and_then(Value::as_str)
+            .and_then(|value| value.parse::<u64>().ok())
+            .ok_or_else(|| DatabaseError::invalid_response(operation, "candidate_bytes"))?;
+        let max_bytes = u64::try_from(query.max_candidate_bytes()).unwrap_or(u64::MAX);
+        if oversized {
+            if byte_count <= max_bytes
+                || !["memory_type", "title", "content", "concepts"]
+                    .iter()
+                    .all(|key| row.get(*key) == Some(&Value::Null))
+            {
+                return Err(DatabaseError::invalid_response(operation, "oversized"));
+            }
+            candidates.push(ContextCandidate::Oversized);
+            terminal = true;
+            continue;
+        }
+        if byte_count > max_bytes {
+            return Err(DatabaseError::invalid_response(
+                operation,
+                "candidate_bytes",
+            ));
+        }
+        let memory_type = context_row_string(operation, row, "memory_type")?.to_owned();
+        let title = context_row_string(operation, row, "title")?.to_owned();
+        let content = context_row_string(operation, row, "content")?.to_owned();
+        let concepts = row
+            .get("concepts")
+            .and_then(Value::as_array)
+            .ok_or_else(|| DatabaseError::invalid_response(operation, "concepts"))?
+            .iter()
+            .map(|value| {
+                value
+                    .as_str()
+                    .map(str::to_owned)
+                    .ok_or_else(|| DatabaseError::invalid_response(operation, "concepts"))
+            })
+            .collect::<Result<Vec<_>, _>>()?;
+        candidates.push(ContextCandidate::Memory(ContextMemory {
+            memory_type,
+            title,
+            content,
+            concepts,
+        }));
+    }
+    Ok(candidates)
+}
+
+fn context_row_string<'a>(
+    operation: DatabaseOperation,
+    row: &'a Map<String, Value>,
+    column: &'static str,
+) -> Result<&'a str, DatabaseError> {
+    row.get(column)
+        .and_then(Value::as_str)
+        .ok_or_else(|| DatabaseError::invalid_response(operation, column))
 }
 
 fn database_failure(operation: DatabaseOperation, _: iii_sdk::Error) -> DatabaseError {
@@ -745,6 +960,185 @@ mod tests {
     use serde_json::{Value, json};
 
     use super::*;
+
+    fn context_query(limit: u32, bytes: usize) -> ValidatedContextQuery {
+        ValidatedContextQuery::try_from(crate::contracts::ContextQuery {
+            limit,
+            max_candidate_bytes: bytes,
+        })
+        .expect("test context query should be valid")
+    }
+
+    fn context_row(title: &str, content: &str, concepts: &[&str], bytes: &str) -> Value {
+        json!({
+            "oversized": false,
+            "memory_type": "fact",
+            "title": title,
+            "content": content,
+            "concepts": concepts,
+            "candidate_bytes": bytes,
+        })
+    }
+
+    fn context_response(rows: Vec<Value>) -> Value {
+        json!({"affected_rows": rows.len(), "last_insert_id": null, "returned_rows": rows})
+    }
+
+    #[tokio::test]
+    async fn context_adapter_sends_static_positional_request_and_preserves_order() {
+        let database = database_target();
+        let query = context_query(2, 128);
+        let result = list_recent_context_with(&database, &query, 1_234, |request| async move {
+            assert_eq!(request.function_id, DATABASE_EXECUTE_FUNCTION_ID);
+            assert_eq!(request.payload["db"], "memory-store-test");
+            assert_eq!(request.payload["sql"], SEARCH_CONTEXT_SQL);
+            assert_eq!(request.payload["params"], json!(["2", "128"]));
+            assert_eq!(request.timeout_ms, Some(1_234));
+            assert!(request.action.is_none());
+            Ok(context_response(vec![
+                context_row("first", "first body", &["a", "b"], "64"),
+                context_row("second", "second body", &["c"], "70"),
+            ]))
+        })
+        .await
+        .expect("ordered narrow records should decode");
+
+        assert_eq!(
+            result,
+            vec![
+                ContextCandidate::Memory(ContextMemory {
+                    memory_type: "fact".into(),
+                    title: "first".into(),
+                    content: "first body".into(),
+                    concepts: vec!["a".into(), "b".into()]
+                }),
+                ContextCandidate::Memory(ContextMemory {
+                    memory_type: "fact".into(),
+                    title: "second".into(),
+                    content: "second body".into(),
+                    concepts: vec!["c".into()]
+                }),
+            ]
+        );
+        assert!(SEARCH_CONTEXT_SQL.contains("LIMIT $1::text::bigint"));
+        assert!(
+            SEARCH_CONTEXT_SQL.find("LIMIT $1").unwrap()
+                < SEARCH_CONTEXT_SQL.find("JOIN public.memories").unwrap()
+        );
+        assert!(
+            SEARCH_CONTEXT_SQL.contains(
+                "octet_length(json_build_object('type', memory.type, 'title', memory.title"
+            )
+        );
+        assert!(
+            SEARCH_CONTEXT_SQL
+                .contains("ORDER BY updated_at DESC, id COLLATE \"C\" ASC, version DESC")
+        );
+        assert!(SEARCH_CONTEXT_SQL.contains("candidate_position <= first_oversized_position"));
+    }
+
+    #[tokio::test]
+    async fn context_adapter_accepts_empty_result_and_returns_only_oversized_sentinel() {
+        let database = database_target();
+        let query = context_query(2, 16);
+        let empty = list_recent_context_with(&database, &query, 3_000, |_| async {
+            Ok(context_response(Vec::new()))
+        })
+        .await
+        .expect("empty envelope should decode");
+        assert!(empty.is_empty());
+
+        let oversized = list_recent_context_with(&database, &query, 3_000, |_| async {
+            Ok(context_response(vec![json!({
+                "oversized": true,
+                "memory_type": null,
+                "title": null,
+                "content": null,
+                "concepts": null,
+                "candidate_bytes": "999",
+            })]))
+        })
+        .await
+        .expect("oversized row should decode as sentinel");
+        assert_eq!(oversized, vec![ContextCandidate::Oversized]);
+    }
+
+    #[tokio::test]
+    async fn context_adapter_rejects_malformed_envelopes_and_rows_without_leaking_values() {
+        const SECRET: &str = "context-secret-sentinel";
+        let database = database_target();
+        let query = context_query(1, 128);
+        for response in [
+            Value::Null,
+            json!({"affected_rows": 0, "last_insert_id": null, "returned_rows": [context_row(SECRET, SECRET, &[SECRET], "20")]}),
+            context_response(vec![
+                json!({"oversized": false, "memory_type": "fact", "title": SECRET, "content": SECRET, "concepts": [SECRET], "candidate_bytes": "999"}),
+            ]),
+            context_response(vec![
+                json!({"oversized": false, "memory_type": 7, "title": SECRET, "content": SECRET, "concepts": [SECRET], "candidate_bytes": "20"}),
+            ]),
+            context_response(vec![
+                json!({"oversized": true, "memory_type": SECRET, "title": null, "content": null, "concepts": null, "candidate_bytes": "999"}),
+            ]),
+            context_response(vec![
+                json!({"oversized": true, "memory_type": null, "title": null, "content": null, "concepts": null, "candidate_bytes": "999"}),
+                context_row(SECRET, SECRET, &[SECRET], "20"),
+            ]),
+        ] {
+            let error =
+                list_recent_context_with(
+                    &database,
+                    &query,
+                    3_000,
+                    move |_| async move { Ok(response) },
+                )
+                .await
+                .expect_err("malformed response should fail");
+            assert_opaque(&error, &[SECRET]);
+            assert!(matches!(
+                error,
+                DatabaseError::InvalidResponse { .. } | DatabaseError::DatabaseFailure { .. }
+            ));
+        }
+    }
+
+    #[tokio::test]
+    async fn context_adapter_awaits_each_sdk_timeout_and_allows_later_progress() {
+        use std::sync::atomic::{AtomicUsize, Ordering};
+
+        let database = database_target();
+        let query = context_query(1, 128);
+        let completed = Arc::new(AtomicUsize::new(0));
+        for _ in 0..2 {
+            let completed_call = Arc::clone(&completed);
+            let error =
+                list_recent_context_with(&database, &query, 3_000, move |request| async move {
+                    assert_eq!(request.timeout_ms, Some(3_000));
+                    completed_call.fetch_add(1, Ordering::SeqCst);
+                    Err(IiiError::Timeout)
+                })
+                .await
+                .expect_err("SDK error should complete as database failure");
+            assert_eq!(
+                error,
+                DatabaseError::database_failure(DatabaseOperation::SearchContext)
+            );
+            assert!(!error.to_string().contains("progress"));
+            assert!(!format!("{error:?}").contains("progress"));
+        }
+        let result = list_recent_context_with(&database, &query, 3_000, |_| async {
+            Ok(context_response(vec![context_row(
+                "progress",
+                "body",
+                &[],
+                "10",
+            )]))
+        })
+        .await
+        .expect("later request should complete");
+        assert_eq!(result.len(), 1);
+        assert_eq!(completed.load(Ordering::SeqCst), 2);
+    }
 
     const EXPECTED_INSERT_MEMORY_SQL: &str = r#"INSERT INTO public.memories (
     id,

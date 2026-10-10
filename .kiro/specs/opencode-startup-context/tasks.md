@@ -20,7 +20,7 @@
   - Completion is observable when invalid inputs make no database call and every valid or failing candidate outcome is independently testable.
   - _Requirements: 1.3, 1.4, 1.5, 1.6, 2.1, 2.2, 2.6_
   - _Boundary: Memory Context Store_
-- [ ] 1.4 Implement the indexed context database adapter
+- [x] 1.4 Implement the indexed context database adapter
   - Select the bounded ordered head prefix before joining canonical text and return only complete records or an oversized sentinel.
   - Use static positional database requests, exact envelope decoding, an SDK-owned timeout, and a terminal await that preserves pending-invocation cleanup.
   - Completion is observable when exact-order, empty, malformed, oversized, repeated-timeout, and subsequent-progress adapter tests pass without protected diagnostics.
