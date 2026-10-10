@@ -12,6 +12,7 @@ import type {
   Submission,
 } from "./model";
 import type { SessionRuntime } from "./runtime";
+import type { StartupContextRuntime } from "./context-runtime";
 
 export type V1PluginInput = Pick<
   PluginInput,
@@ -20,6 +21,7 @@ export type V1PluginInput = Pick<
 
 export interface AdapterDependencies {
   readonly runtime: SessionRuntime;
+  readonly context?: StartupContextRuntime;
   readonly report: (diagnostic: Diagnostic) => void;
   readonly now: () => Date;
 }
@@ -32,11 +34,25 @@ export interface V1EventInput {
 
 export type V1Hook = (input: unknown, output: unknown) => Promise<void>;
 
+export interface V1SystemTransformInput {
+  readonly sessionID?: string;
+}
+
+export interface V1SystemTransformOutput {
+  readonly system: string[];
+}
+
+export type V1SystemTransform = (
+  input: V1SystemTransformInput,
+  output: V1SystemTransformOutput,
+) => Promise<void>;
+
 export interface V1Hooks {
   readonly event: (input: V1EventInput) => Promise<void>;
   readonly "chat.message": V1Hook;
   readonly "tool.execute.before": V1Hook;
   readonly "tool.execute.after": V1Hook;
+  readonly "experimental.chat.system.transform": V1SystemTransform;
   readonly dispose: () => Promise<void>;
 }
 
@@ -73,6 +89,7 @@ interface EventDetails {
 }
 
 const GENERATION: Generation = "v1";
+const CONTEXT_TRANSFORM_KIND = "experimental.chat.system.transform";
 const MAX_DIAGNOSTIC_IDENTITY_LENGTH = 128;
 const DIAGNOSTIC_IDENTITY_SUFFIX = "...";
 const ACCEPTED_NATIVE_KINDS: ReadonlySet<string> = new Set<AcceptedNativeKind>([
@@ -528,6 +545,46 @@ function handleHook(
   }
 }
 
+async function handleSystemTransform(
+  dependencies: AdapterDependencies,
+  transformInput: unknown,
+  transformOutput: unknown,
+): Promise<void> {
+  let sessionId: string | undefined;
+
+  try {
+    if (isRecord(transformInput)) {
+      sessionId = sessionIdValue(transformInput, "sessionID");
+    }
+    if (sessionId === undefined) {
+      return;
+    }
+
+    let system: unknown;
+    if (isRecord(transformOutput)) {
+      system = transformOutput["system"];
+    }
+    if (!Array.isArray(system)) {
+      reportSerialization(dependencies, CONTEXT_TRANSFORM_KIND, sessionId);
+      return;
+    }
+
+    const { context } = dependencies;
+    if (context === undefined) {
+      return;
+    }
+
+    const snapshot = await context.resolve(sessionId);
+    if (snapshot.kind !== "text") {
+      return;
+    }
+
+    system.push(snapshot.text);
+  } catch {
+    reportSerialization(dependencies, CONTEXT_TRANSFORM_KIND, sessionId);
+  }
+}
+
 export function createV1Adapter(
   input: V1PluginInput,
   dependencies: AdapterDependencies,
@@ -569,6 +626,17 @@ export function createV1Adapter(
       disposePromise = Promise.resolve();
     }
     return disposePromise;
+  };
+
+  const systemTransform: V1SystemTransform = (
+    transformInput,
+    transformOutput,
+  ) => {
+    if (stopped) {
+      return Promise.resolve();
+    }
+
+    return handleSystemTransform(dependencies, transformInput, transformOutput);
   };
 
   return {
@@ -651,6 +719,7 @@ export function createV1Adapter(
               dependencies.runtime.observe(eventObservation);
             } finally {
               sessionDirectories.delete(details.sessionId);
+              dependencies.context?.remove(details.sessionId);
               dependencies.runtime.end(eventMetadata);
             }
             break;
@@ -665,6 +734,7 @@ export function createV1Adapter(
     "chat.message": createHook("chat.message"),
     "tool.execute.before": createHook("tool.execute.before"),
     "tool.execute.after": createHook("tool.execute.after"),
+    "experimental.chat.system.transform": systemTransform,
     dispose,
   };
 }

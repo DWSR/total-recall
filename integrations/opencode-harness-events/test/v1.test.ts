@@ -6,12 +6,16 @@
 import { expect, test } from "bun:test";
 import { createSessionRuntime, type SessionRuntime } from "../src/runtime";
 import type { Diagnostic, JsonObject, Submission } from "../src/model";
+import type { FrozenSnapshot } from "../src/context-format";
+import type { StartupContextRuntime } from "../src/context-runtime";
 import { createV1Adapter, type V1PluginInput } from "../src/v1";
 
 const NATIVE_CREATED_MS = Date.parse("2026-09-20T12:34:56.789Z");
 const CLOCK_MS = Date.parse("2026-09-20T13:14:15.016Z");
 const SESSION_UPDATE_OFFSET_MS = 1000;
 const SESSION_ID = "session-v1";
+const FROZEN_TEXT =
+  'startup-memory-fixture\n{"memories":[{"type":"pattern","title":"quote\\" pass","content":"line\\nbreak"}]}\n';
 
 const input = {
   directory: "/plugin/project",
@@ -868,4 +872,331 @@ test("stops hook input before idempotent runtime disposal and contains close fai
   expect(closeCount).toBe(1);
   expect(order).toEqual(["runtime.close"]);
   expect(submissions).toEqual([]);
+});
+
+function contextStub(resolve: (sessionId: string) => Promise<FrozenSnapshot>): {
+  readonly context: StartupContextRuntime;
+  readonly state: {
+    readonly resolveCalls: string[];
+    readonly removed: string[];
+    closeCalls: number;
+  };
+} {
+  const state = {
+    resolveCalls: [] as string[],
+    removed: [] as string[],
+    closeCalls: 0,
+  };
+  const context: StartupContextRuntime = {
+    resolve: (sessionId) => {
+      state.resolveCalls.push(sessionId);
+      return resolve(sessionId);
+    },
+    remove: (sessionId) => {
+      state.removed.push(sessionId);
+    },
+    close: () => {
+      state.closeCalls += 1;
+      return Promise.resolve();
+    },
+  };
+  return { context, state };
+}
+
+type UnknownTransform = (input: unknown, output: unknown) => Promise<void>;
+
+function contextTransform(
+  hooks: ReturnType<typeof createV1Adapter>,
+): UnknownTransform {
+  return hooks[
+    "experimental.chat.system.transform"
+  ] as unknown as UnknownTransform;
+}
+
+test("registers the pinned experimental system transform", () => {
+  const recording = recordingRuntime();
+  const hooks = createV1Adapter(input, {
+    runtime: recording.runtime,
+    report: () => undefined,
+    now: () => new Date(CLOCK_MS),
+  });
+
+  expect(Object.hasOwn(hooks, "experimental.chat.system.transform")).toBe(true);
+  expect(typeof contextTransform(hooks)).toBe("function");
+});
+
+test("appends the frozen snapshot verbatim on repeated transforms while preserving existing system entries", async () => {
+  const recording = recordingRuntime();
+  const stub = contextStub(async () => ({ kind: "text", text: FROZEN_TEXT }));
+  const hooks = createV1Adapter(input, {
+    runtime: recording.runtime,
+    context: stub.context,
+    report: () => undefined,
+    now: () => new Date(CLOCK_MS),
+  });
+  const transform = contextTransform(hooks);
+  const output = { system: ["host instructions"] };
+
+  await transform({ sessionID: SESSION_ID }, output);
+  await transform({ sessionID: SESSION_ID }, output);
+
+  expect(output.system).toEqual([
+    "host instructions",
+    FROZEN_TEXT,
+    FROZEN_TEXT,
+  ]);
+  expect(stub.state.resolveCalls).toEqual([SESSION_ID, SESSION_ID]);
+  expect(recording.submissions).toEqual([]);
+});
+
+test("appends byte-identical text to concurrent transforms from the same frozen snapshot", async () => {
+  const recording = recordingRuntime();
+  let settleFrozen!: (snapshot: FrozenSnapshot) => void;
+  const shared = new Promise<FrozenSnapshot>((resolvePending) => {
+    settleFrozen = resolvePending;
+  });
+  const stub = contextStub(async () => shared);
+  const hooks = createV1Adapter(input, {
+    runtime: recording.runtime,
+    context: stub.context,
+    report: () => undefined,
+    now: () => new Date(CLOCK_MS),
+  });
+  const transform = contextTransform(hooks);
+  const primary = { system: ["primary host"] };
+  const auxiliary = { system: ["auxiliary host"] };
+
+  const pending = Promise.all([
+    transform({ sessionID: SESSION_ID }, primary),
+    transform({ sessionID: SESSION_ID }, auxiliary),
+  ]);
+  settleFrozen({ kind: "text", text: FROZEN_TEXT });
+  await pending;
+
+  expect(primary.system).toEqual(["primary host", FROZEN_TEXT]);
+  expect(auxiliary.system).toEqual(["auxiliary host", FROZEN_TEXT]);
+});
+
+test("performs no lookup, mutation, or fallback without an explicit session identity", async () => {
+  const recording = recordingRuntime();
+  const stub = contextStub(async () => ({ kind: "text", text: FROZEN_TEXT }));
+  const diagnostics: Diagnostic[] = [];
+  const hooks = createV1Adapter(input, {
+    runtime: recording.runtime,
+    context: stub.context,
+    report: (diagnostic) => diagnostics.push(diagnostic),
+    now: () => new Date(CLOCK_MS),
+  });
+  const transform = contextTransform(hooks);
+  const outputs = [
+    { system: ["kept-missing"] },
+    { system: ["kept-undefined"] },
+    { system: ["kept-number"] },
+    { system: ["kept-blank"] },
+    { system: ["kept-nonrecord"] },
+  ];
+
+  await transform({}, outputs[0]);
+  await transform({ sessionID: undefined }, outputs[1]);
+  await transform({ sessionID: 42 }, outputs[2]);
+  await transform({ sessionID: "   " }, outputs[3]);
+  await transform(42, outputs[4]);
+
+  expect(stub.state.resolveCalls).toEqual([]);
+  expect(outputs.map((output) => output.system)).toEqual([
+    ["kept-missing"],
+    ["kept-undefined"],
+    ["kept-number"],
+    ["kept-blank"],
+    ["kept-nonrecord"],
+  ]);
+  expect(diagnostics).toEqual([]);
+  expect(recording.submissions).toEqual([]);
+});
+
+test("contributes nothing for an empty frozen snapshot", async () => {
+  const recording = recordingRuntime();
+  const stub = contextStub(async () => ({ kind: "empty" }));
+  const hooks = createV1Adapter(input, {
+    runtime: recording.runtime,
+    context: stub.context,
+    report: () => undefined,
+    now: () => new Date(CLOCK_MS),
+  });
+  const transform = contextTransform(hooks);
+  const output = { system: ["host only"] };
+
+  await transform({ sessionID: SESSION_ID }, output);
+
+  expect(output.system).toEqual(["host only"]);
+  expect(stub.state.resolveCalls).toEqual([SESSION_ID]);
+});
+
+test("resolves on every transform instead of caching snapshots in the adapter", async () => {
+  const recording = recordingRuntime();
+  let lookups = 0;
+  const stub = contextStub(() => {
+    lookups += 1;
+    if (lookups === 1) {
+      return Promise.resolve({ kind: "text", text: FROZEN_TEXT });
+    }
+    return Promise.resolve({ kind: "empty" });
+  });
+  const hooks = createV1Adapter(input, {
+    runtime: recording.runtime,
+    context: stub.context,
+    report: () => undefined,
+    now: () => new Date(CLOCK_MS),
+  });
+  const transform = contextTransform(hooks);
+  const first = { system: [] as string[] };
+  const second = { system: [] as string[] };
+
+  await transform({ sessionID: SESSION_ID }, first);
+  await transform({ sessionID: SESSION_ID }, second);
+
+  expect(first.system).toEqual([FROZEN_TEXT]);
+  expect(second.system).toEqual([]);
+  expect(stub.state.resolveCalls).toEqual([SESSION_ID, SESSION_ID]);
+});
+
+test("removes context state on session deletion while preserving capture deletion", async () => {
+  const recording = recordingRuntime();
+  const stub = contextStub(async () => ({ kind: "empty" }));
+  const hooks = createV1Adapter(input, {
+    runtime: recording.runtime,
+    context: stub.context,
+    report: () => undefined,
+    now: () => new Date(CLOCK_MS),
+  });
+
+  await hooks.event({
+    event: { type: "session.deleted", properties: { info: sessionInfo() } },
+  });
+
+  expect(stub.state.removed).toEqual([SESSION_ID]);
+  expect(recording.submissions.map((submission) => submission.kind)).toEqual([
+    "observation",
+    "end",
+  ]);
+});
+
+test("keeps capture unchanged and never submits injected startup memory", async () => {
+  const recording = recordingRuntime();
+  const diagnostics: Diagnostic[] = [];
+  const stub = contextStub(async () => ({ kind: "text", text: FROZEN_TEXT }));
+  const hooks = createV1Adapter(input, {
+    runtime: recording.runtime,
+    context: stub.context,
+    report: (diagnostic) => diagnostics.push(diagnostic),
+    now: () => new Date(CLOCK_MS),
+  });
+  const transform = contextTransform(hooks);
+
+  await hooks.event({
+    event: { type: "session.created", properties: { info: sessionInfo() } },
+  });
+  await hooks["chat.message"](
+    { sessionID: SESSION_ID },
+    { message: { role: "user", content: "prompt" }, parts: [] },
+  );
+  const output = { system: ["host"] };
+  await transform({ sessionID: SESSION_ID }, output);
+  await hooks.event({
+    event: { type: "session.deleted", properties: { info: sessionInfo() } },
+  });
+
+  const observations = recording.submissions.filter(
+    (
+      submission,
+    ): submission is Extract<Submission, { readonly kind: "observation" }> =>
+      submission.kind === "observation",
+  );
+  expect(observations.map((observation) => observation.hookType)).toEqual([
+    "opencode.v1.session.created",
+    "opencode.v1.chat.message",
+    "opencode.v1.session.deleted",
+  ]);
+  expect(output.system).toEqual(["host", FROZEN_TEXT]);
+  expect(JSON.stringify(recording.submissions)).not.toContain(
+    "startup-memory-fixture",
+  );
+  expect(diagnostics).toEqual([]);
+});
+
+test("contains transform failures with payload-free diagnostics", async () => {
+  const recording = recordingRuntime();
+  const failing = contextStub(() =>
+    Promise.reject(new Error("resolve-secret")),
+  );
+  const diagnostics: Diagnostic[] = [];
+  const hooks = createV1Adapter(input, {
+    runtime: recording.runtime,
+    context: failing.context,
+    report: (diagnostic) => diagnostics.push(diagnostic),
+    now: () => new Date(CLOCK_MS),
+  });
+  const transform = contextTransform(hooks);
+  const rejected = { system: ["kept"] };
+
+  await transform({ sessionID: SESSION_ID }, rejected);
+
+  expect(rejected.system).toEqual(["kept"]);
+  expect(diagnostics).toEqual([
+    {
+      category: "serialization",
+      generation: "v1",
+      nativeKind: "experimental.chat.system.transform",
+      sessionId: SESSION_ID,
+    },
+  ]);
+  expect(JSON.stringify(diagnostics)).not.toContain("resolve-secret");
+
+  const unusable = contextStub(async () => ({ kind: "empty" }));
+  const unusableHooks = createV1Adapter(input, {
+    runtime: recording.runtime,
+    context: unusable.context,
+    report: (diagnostic) => diagnostics.push(diagnostic),
+    now: () => new Date(CLOCK_MS),
+  });
+  const unusableTransform = contextTransform(unusableHooks);
+  const malformed = { system: "not-an-array" };
+
+  await unusableTransform({ sessionID: SESSION_ID }, malformed);
+
+  expect(unusable.state.resolveCalls).toEqual([]);
+  expect(diagnostics).toEqual([
+    {
+      category: "serialization",
+      generation: "v1",
+      nativeKind: "experimental.chat.system.transform",
+      sessionId: SESSION_ID,
+    },
+    {
+      category: "serialization",
+      generation: "v1",
+      nativeKind: "experimental.chat.system.transform",
+      sessionId: SESSION_ID,
+    },
+  ]);
+});
+
+test("leaves context shutdown to the coordinator and stops injection after disposal", async () => {
+  const recording = recordingRuntime();
+  const stub = contextStub(async () => ({ kind: "text", text: FROZEN_TEXT }));
+  const hooks = createV1Adapter(input, {
+    runtime: recording.runtime,
+    context: stub.context,
+    report: () => undefined,
+    now: () => new Date(CLOCK_MS),
+  });
+  const transform = contextTransform(hooks);
+  const output = { system: ["host"] };
+
+  await hooks.dispose();
+  await transform({ sessionID: SESSION_ID }, output);
+
+  expect(output.system).toEqual(["host"]);
+  expect(stub.state.resolveCalls).toEqual([]);
+  expect(stub.state.closeCalls).toBe(0);
 });

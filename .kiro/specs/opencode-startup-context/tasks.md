@@ -117,7 +117,7 @@
   - _Boundary: Context Runtime_
 
 - [ ] 4. Integrate context with both OpenCode generations
-- [ ] 4.1 (P) Add OpenCode v1 system injection
+- [x] 4.1 (P) Add OpenCode v1 system injection
   - Register the pinned experimental system transform and use only explicit session identity with no global fallback.
   - Append the same frozen string on every primary or auxiliary transform while preserving existing system entries, capture hooks, deletion, and disposal behavior.
   - Completion is observable when v1 tests prove exact registration, concurrent and repeated injection, missing-ID no-op, state removal, unchanged capture, and no startup-memory observation.
