@@ -108,7 +108,7 @@
   - _Depends: 3.2, 3.5, 3.6_
   - _Requirements: 5.1, 5.2, 5.3, 5.4, 5.5, 5.6, 5.7, 5.8, 5.9, 6.5, 6.6, 6.7, 6.8, 8.4, 8.8_
   - _Boundary: Context Runtime_
-- [ ] 3.8 Handle session teardown and identity reuse
+- [x] 3.8 Handle session teardown and identity reuse
   - Reject missing session identities before transport activity and invalidate in-flight state on deletion or runtime close.
   - Discard late completion by state identity, permit a reused textual ID to create fresh state, and clear every owned snapshot on disposal.
   - Completion is observable when tests cover missing IDs, deletion during lookup, late completion, ID reuse, repeated removal, and close with no retained state.
@@ -218,3 +218,4 @@
 
 - Reopened task 3.5 after task 3.6 exposed a response-pump ownership defect; generation-scoped pumps now keep failed generations from blocking replacements.
 - Task 3.7 review: task 3.8 should assert frozen-empty repeat results (no second lookup after empty/failed freeze) and consider guarding synchronous `transport.request` throws at the runtime seam.
+- The suite red on `test/package-contract.test.ts` "packs an allowlisted package" is pre-existing: `BUILT_MODULES`/`expectedArtifactFiles()` lack the four context modules added in tasks 3.5–3.7; extending the packed artifact allowlist is task 4.3's deliverable. Treat as boundary-external until 4.3.

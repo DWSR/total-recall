@@ -69,7 +69,14 @@ function createContextRuntime(
     const expiry = new Promise<never>((_, rejectExpiry) => {
       timer = setTimeout(rejectExpiry, Math.max(0, deadline - Date.now()));
     });
-    Promise.race([transport.request(bounds.limit), expiry]).then(
+    let request: Promise<ContextTransportOutcome>;
+    try {
+      request = transport.request(bounds.limit);
+    } catch (error) {
+      // A synchronous transport refusal settles through the failure path instead of escaping resolve.
+      request = Promise.reject(error);
+    }
+    Promise.race([request, expiry]).then(
       (outcome) => {
         if (timer !== undefined) {
           clearTimeout(timer);
@@ -94,6 +101,10 @@ function createContextRuntime(
   }
 
   function resolve(sessionId: string): Promise<FrozenSnapshot> {
+    if (sessionId.trim() === "") {
+      // A missing identity performs no lookup, stores no state, and contributes no system content.
+      return Promise.resolve(FROZEN_EMPTY);
+    }
     const existing = sessions.get(sessionId);
     if (existing !== undefined) {
       if (isResolving(existing)) {
