@@ -142,7 +142,7 @@
   - _Boundary: Plugin Coordinator, Package Contract_
 
 - [ ] 5. Verify real process and host boundaries
-- [ ] 5.1 Add real context-worker artifact ownership
+- [x] 5.1 Add real context-worker artifact ownership
   - Extend explicit E2E artifacts and validation with the real worker and a PID-observing wrapper.
   - Reuse bounded process guards and prove direct retrieval-child exit before fallback process-group cleanup.
   - Completion is observable when artifact tests reject missing or wrong workers and wrapper tests observe success, error, timeout, and cleanup exits.

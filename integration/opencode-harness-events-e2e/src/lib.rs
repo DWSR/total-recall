@@ -13,10 +13,14 @@ use serde_json::Value;
 use thiserror::Error;
 use tokio::time::{Instant, sleep};
 
+pub mod context_worker;
 pub mod engine;
 pub mod opencode;
 pub mod process;
 
+pub use context_worker::{
+    ContextWorkerError, ContextWorkerExit, ContextWorkerOutcome, ContextWorkerProcess,
+};
 pub use engine::{CAPTURE_FUNCTION_IDS, CaptureRecord, CaptureSet, EngineHarness, EngineSession};
 pub use engine::{CaptureAssertionError, EngineError, EngineIdentity};
 pub use opencode::{
@@ -33,6 +37,7 @@ const OPENCODE_V1_BIN: &str = "OPENCODE_V1_BIN";
 const OPENCODE_V2_BIN: &str = "OPENCODE_V2_BIN";
 const HARNESS_EVENTS_BIN: &str = "HARNESS_EVENTS_BIN";
 const PLUGIN_TARBALL: &str = "PLUGIN_TARBALL";
+const MCP_WORKER_BIN: &str = "MCP_WORKER_BIN";
 const MATRIX_CAPTURE_TIMEOUT: Duration = Duration::from_secs(30);
 const MATRIX_CAPTURE_POLL_INTERVAL: Duration = Duration::from_millis(50);
 const III_CALLER_WORKER_ID_FIELD: &str = "_caller_worker_id";
@@ -44,15 +49,17 @@ pub enum ArtifactKind {
     OpenCodeV2,
     HarnessEvents,
     PluginTarball,
+    McpWorker,
 }
 
 impl ArtifactKind {
-    pub const ALL: [Self; 5] = [
+    pub const ALL: [Self; 6] = [
         Self::Iii,
         Self::OpenCodeV1,
         Self::OpenCodeV2,
         Self::HarnessEvents,
         Self::PluginTarball,
+        Self::McpWorker,
     ];
 
     pub const fn environment_variable(self) -> &'static str {
@@ -62,6 +69,7 @@ impl ArtifactKind {
             Self::OpenCodeV2 => OPENCODE_V2_BIN,
             Self::HarnessEvents => HARNESS_EVENTS_BIN,
             Self::PluginTarball => PLUGIN_TARBALL,
+            Self::McpWorker => MCP_WORKER_BIN,
         }
     }
 
@@ -72,6 +80,7 @@ impl ArtifactKind {
             Self::OpenCodeV2 => "opencode-v2",
             Self::HarnessEvents => "harness-events",
             Self::PluginTarball => "plugin tarball",
+            Self::McpWorker => "mcp-worker",
         }
     }
 }
@@ -89,6 +98,32 @@ pub struct ArtifactPaths {
     pub opencode_v2: PathBuf,
     pub harness_events: PathBuf,
     pub plugin_tarball: PathBuf,
+}
+
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct ContextWorkerArtifacts {
+    pub mcp_worker: PathBuf,
+}
+
+impl ContextWorkerArtifacts {
+    pub fn from_env() -> Result<Self, ArtifactPathError> {
+        Self::from_lookup(|variable| env::var_os(variable))
+    }
+
+    fn from_lookup<F>(mut lookup: F) -> Result<Self, ArtifactPathError>
+    where
+        F: FnMut(&str) -> Option<OsString>,
+    {
+        let paths = Self {
+            mcp_worker: path_from_lookup(ArtifactKind::McpWorker, &mut lookup)?,
+        };
+        paths.validate()?;
+        Ok(paths)
+    }
+
+    pub fn validate(&self) -> Result<(), ArtifactPathError> {
+        validate_path(ArtifactKind::McpWorker, self.mcp_worker.as_path())
+    }
 }
 
 impl ArtifactPaths {
@@ -646,7 +681,10 @@ fn is_millisecond_rfc3339(value: &str) -> bool {
         && DateTime::parse_from_rfc3339(value).is_ok()
 }
 
-fn path_from_lookup<F>(kind: ArtifactKind, lookup: &mut F) -> Result<PathBuf, ArtifactPathError>
+pub(crate) fn path_from_lookup<F>(
+    kind: ArtifactKind,
+    lookup: &mut F,
+) -> Result<PathBuf, ArtifactPathError>
 where
     F: FnMut(&str) -> Option<OsString>,
 {
@@ -659,7 +697,7 @@ where
     Ok(path)
 }
 
-fn validate_path(kind: ArtifactKind, path: &Path) -> Result<(), ArtifactPathError> {
+pub(crate) fn validate_path(kind: ArtifactKind, path: &Path) -> Result<(), ArtifactPathError> {
     if is_blank(path) {
         return Err(ArtifactPathError::Blank { artifact: kind });
     }
@@ -691,8 +729,9 @@ mod tests {
     use serde_json::{Value, json};
 
     use super::{
-        ArtifactKind, ArtifactPathError, ArtifactPaths, CaptureRecord, CaptureSet, Generation,
-        MatrixAssertionKind, MatrixExpectation, assert_capture_contract,
+        ArtifactKind, ArtifactPathError, ArtifactPaths, CaptureRecord, CaptureSet,
+        ContextWorkerArtifacts, Generation, MatrixAssertionKind, MatrixExpectation,
+        assert_capture_contract,
     };
 
     fn regular_file() -> PathBuf {
@@ -805,6 +844,88 @@ mod tests {
                 variable: "HARNESS_EVENTS_BIN"
             })
         );
+    }
+
+    fn context_worker_environment() -> HashMap<&'static str, OsString> {
+        HashMap::from([(
+            ArtifactKind::McpWorker.environment_variable(),
+            regular_file().into_os_string(),
+        )])
+    }
+
+    #[test]
+    fn context_worker_artifact_parses_the_explicit_real_worker_path() {
+        let values = context_worker_environment();
+        let parsed = ContextWorkerArtifacts::from_lookup(|variable| values.get(variable).cloned())
+            .expect("the explicit real worker artifact parses");
+        assert_eq!(parsed.mcp_worker, regular_file());
+        parsed
+            .validate()
+            .expect("the real worker artifact validates");
+
+        assert_eq!(
+            ArtifactKind::McpWorker.environment_variable(),
+            "MCP_WORKER_BIN"
+        );
+        assert_eq!(format!("{}", ArtifactKind::McpWorker), "mcp-worker");
+        assert!(ArtifactKind::ALL.contains(&ArtifactKind::McpWorker));
+    }
+
+    #[test]
+    fn context_worker_artifact_rejects_missing_and_blank_environments() {
+        assert_eq!(
+            ContextWorkerArtifacts::from_lookup(|_| None),
+            Err(ArtifactPathError::MissingEnvironment {
+                variable: "MCP_WORKER_BIN"
+            })
+        );
+
+        let values = HashMap::from([(
+            ArtifactKind::McpWorker.environment_variable(),
+            OsString::from("  "),
+        )]);
+        assert_eq!(
+            ContextWorkerArtifacts::from_lookup(|variable| values.get(variable).cloned()),
+            Err(ArtifactPathError::BlankEnvironment {
+                variable: "MCP_WORKER_BIN"
+            })
+        );
+    }
+
+    #[test]
+    fn context_worker_artifact_validation_rejects_unusable_worker_claims() {
+        let worker = ContextWorkerArtifacts {
+            mcp_worker: PathBuf::from("   "),
+        };
+        assert_eq!(
+            worker.validate(),
+            Err(ArtifactPathError::Blank {
+                artifact: ArtifactKind::McpWorker
+            })
+        );
+
+        let worker = ContextWorkerArtifacts {
+            mcp_worker: PathBuf::from(env!("CARGO_MANIFEST_DIR"))
+                .join("missing-real-worker-artifact"),
+        };
+        assert!(matches!(
+            worker.validate(),
+            Err(ArtifactPathError::Unusable {
+                artifact: ArtifactKind::McpWorker,
+                ..
+            })
+        ));
+
+        let worker = ContextWorkerArtifacts {
+            mcp_worker: PathBuf::from(env!("CARGO_MANIFEST_DIR")),
+        };
+        assert!(matches!(
+            worker.validate(),
+            Err(ArtifactPathError::Unusable {
+                artifact: ArtifactKind::McpWorker,
+                ..
+            })
+        ));
     }
 
     #[test]
