@@ -317,6 +317,11 @@ await new Promise(() => {});`,
 
 const BUILT_MODULES = [
   "config",
+  "context-client",
+  "context-coordinator",
+  "context-config",
+  "context-format",
+  "context-runtime",
   "dispatcher",
   "index",
   "model",
@@ -325,13 +330,211 @@ const BUILT_MODULES = [
   "v2",
 ] as const;
 
-interface HarnessRecord {
-  readonly args: readonly string[];
-  readonly stdin: string;
-  readonly env: {
-    readonly III_URL: string | null;
-    readonly III_NAMESPACE: string | null;
-  };
+const CONTEXT_MODES = [
+  "enabled",
+  "disabled",
+  "invalid",
+  "worker_failure",
+] as const;
+type ContextContractMode = (typeof CONTEXT_MODES)[number];
+const CONTEXT_DATABASE_VALUE = "postgres://contract/private/db";
+const CONTEXT_LIMIT_VALUE = "2";
+const CONTEXT_PROTOCOL_VERSION = "2026-07-28";
+const CONTEXT_SERVER_NAME = "total-recall-mcp";
+const CONTEXT_CONFIG_DIAGNOSTIC = "startup context configuration is invalid";
+const EXPECTED_CONTEXT_CHILD_ENVIRONMENT = {
+  III_URL: "http://contract.invalid",
+  III_NAMESPACE: "contract",
+  TOTAL_RECALL_MEMORY_DATABASE: CONTEXT_DATABASE_VALUE,
+  TOTAL_RECALL_MCP_MAX_LINE_BYTES: "4096",
+  TOTAL_RECALL_MCP_CHANNEL_CAPACITY: "16",
+  TOTAL_RECALL_MCP_MAX_IN_FLIGHT: "16",
+  TOTAL_RECALL_MCP_CONTEXT_DEFAULT_LIMIT: CONTEXT_LIMIT_VALUE,
+  TOTAL_RECALL_MCP_CONTEXT_MAX_LIMIT: "20",
+  TOTAL_RECALL_MCP_CONTEXT_MAX_RESULT_BYTES: "32768",
+  TOTAL_RECALL_MCP_CONTEXT_TIMEOUT_MS: "5000",
+  TOTAL_RECALL_MCP_CONTEXT_DATABASE_TIMEOUT_MS: "3000",
+};
+const AMBIENT_ENVIRONMENT_PROBES = {
+  HTTPS_PROXY: "http://ambient.invalid",
+  OPENAI_API_KEY: "ambient-credential-sentinel",
+} as const;
+/** One ready worker serves discovery, tool listing, and one context lookup per instance. */
+const CONTEXT_REQUESTS_PER_READY_WORKER = 3;
+const EXPECTED_CONTEXT_START_COUNTS: Record<ContextContractMode, number> = {
+  enabled: 2,
+  disabled: 0,
+  invalid: 0,
+  worker_failure: 4,
+};
+
+const CONTEXT_WORKER_INPUT_SCHEMA = {
+  type: "object",
+  properties: { limit: { type: "integer", minimum: 1, maximum: 50 } },
+  required: [],
+  additionalProperties: false,
+};
+const CONTEXT_WORKER_OUTPUT_SCHEMA = {
+  type: "object",
+  properties: {
+    memories: {
+      type: "array",
+      items: {
+        type: "object",
+        properties: {
+          type: { type: "string" },
+          title: { type: "string" },
+          content: { type: "string" },
+          concepts: { type: "array", items: { type: "string" } },
+        },
+        required: ["type", "title", "content", "concepts"],
+        additionalProperties: false,
+      },
+    },
+  },
+  required: ["memories"],
+  additionalProperties: false,
+};
+
+function contextWorkerScript(logPath: string): string {
+  return `#!${process.execPath}
+import { appendFile } from "node:fs/promises";
+
+const LOG = ${JSON.stringify(logPath)};
+const CONTEXT_MEMORY = {
+  type: "pattern",
+  title: "contract memory",
+  content: "contract startup context body",
+  concepts: ["contract", "startup"],
+};
+const REQUEST_COUNTER = { served: 0 };
+
+function respond(request) {
+  if (request.method === "server/discover") {
+    return {
+      jsonrpc: "2.0",
+      id: request.id,
+      result: {
+        _meta: {
+          "io.modelcontextprotocol/protocolVersion": "${CONTEXT_PROTOCOL_VERSION}",
+          "io.modelcontextprotocol/serverInfo": {
+            name: "${CONTEXT_SERVER_NAME}",
+            version: "contract",
+          },
+        },
+      },
+    };
+  }
+  if (request.method === "tools/list") {
+    return {
+      jsonrpc: "2.0",
+      id: request.id,
+      result: {
+        tools: [
+          {
+            name: "memory_context",
+            inputSchema: ${JSON.stringify(CONTEXT_WORKER_INPUT_SCHEMA)},
+            outputSchema: ${JSON.stringify(CONTEXT_WORKER_OUTPUT_SCHEMA)},
+          },
+        ],
+      },
+    };
+  }
+  if (request.method === "tools/call" && request.params?.name === "memory_context") {
+    return {
+      jsonrpc: "2.0",
+      id: request.id,
+      result: { memories: [CONTEXT_MEMORY] },
+    };
+  }
+  process.exit(3);
+}
+
+await appendFile(LOG, JSON.stringify({ event: "start", env: process.env }) + "\\n");
+const EXIT_RECORD = { once: false };
+const writeExit = async () => {
+  if (EXIT_RECORD.once) {
+    return;
+  }
+  EXIT_RECORD.once = true;
+  await appendFile(LOG, JSON.stringify({ event: "exit", requests: REQUEST_COUNTER.served }) + "\\n");
+};
+process.on("SIGTERM", () => {
+  void (async () => {
+    await writeExit();
+    process.exit(0);
+  })();
+});
+process.on("SIGKILL", () => process.exit(0));
+
+const decoder = new TextDecoder();
+let buffer = "";
+for await (const chunk of process.stdin) {
+  buffer += decoder.decode(chunk, { stream: true });
+  let boundary = buffer.indexOf("\\n");
+  while (boundary !== -1) {
+    const line = buffer.slice(0, boundary);
+    buffer = buffer.slice(boundary + 1);
+    if (line.trim() !== "") {
+      const request = JSON.parse(line);
+      REQUEST_COUNTER.served += 1;
+      await appendFile(
+        LOG,
+        JSON.stringify({ event: "request", method: request.method, id: request.id }) + "\\n",
+      );
+      process.stdout.write(JSON.stringify(respond(request)) + "\\n");
+    }
+    boundary = buffer.indexOf("\\n");
+  }
+}
+await writeExit();
+`;
+}
+
+function failingContextWorkerScript(logPath: string): string {
+  return `#!${process.execPath}
+import { appendFile } from "node:fs/promises";
+
+const LOG = ${JSON.stringify(logPath)};
+await appendFile(LOG, JSON.stringify({ event: "start", env: process.env }) + "\\n");
+process.on("SIGTERM", () => process.exit(0));
+process.on("SIGKILL", () => process.exit(0));
+process.exit(0);
+`;
+}
+
+function modeEnvironment(
+  mode: ContextContractMode,
+  contextBin: string,
+  failingBin: string,
+): Readonly<Record<string, string>> {
+  const probes = { ...AMBIENT_ENVIRONMENT_PROBES };
+  if (mode === "enabled") {
+    return {
+      CONTRACT_CONTEXT_MODE: mode,
+      ...probes,
+      TOTAL_RECALL_CONTEXT_BIN: contextBin,
+      TOTAL_RECALL_MEMORY_DATABASE: CONTEXT_DATABASE_VALUE,
+      TOTAL_RECALL_CONTEXT_LIMIT: CONTEXT_LIMIT_VALUE,
+    };
+  }
+  if (mode === "worker_failure") {
+    return {
+      CONTRACT_CONTEXT_MODE: mode,
+      ...probes,
+      TOTAL_RECALL_CONTEXT_BIN: failingBin,
+      TOTAL_RECALL_MEMORY_DATABASE: CONTEXT_DATABASE_VALUE,
+      TOTAL_RECALL_CONTEXT_LIMIT: CONTEXT_LIMIT_VALUE,
+    };
+  }
+  if (mode === "invalid") {
+    return {
+      CONTRACT_CONTEXT_MODE: mode,
+      ...probes,
+      TOTAL_RECALL_CONTEXT_BIN: contextBin,
+    };
+  }
+  return { CONTRACT_CONTEXT_MODE: mode, ...probes };
 }
 
 interface ConsumerResult {
@@ -340,6 +543,20 @@ interface ConsumerResult {
   readonly v1CountAfterCallbacks: number;
   readonly v2CountBeforeCleanup: number;
   readonly v2CountAfterCallbacks: number;
+  readonly eagerStarts: number;
+  readonly v1SystemStable: boolean;
+  readonly v2SystemStable: boolean;
+  readonly v1System: readonly unknown[];
+  readonly v2System: readonly unknown[];
+}
+
+interface HarnessRecord {
+  readonly args: readonly string[];
+  readonly stdin: string;
+  readonly env: {
+    readonly III_URL: string | null;
+    readonly III_NAMESPACE: string | null;
+  };
 }
 
 function harnessRecords(source: string): HarnessRecord[] {
@@ -358,6 +575,30 @@ function recordAt(
     throw new Error(`missing harness record at index ${index}`);
   }
   return record;
+}
+
+interface ContextLogRecord {
+  readonly event: string;
+  readonly method?: string;
+  readonly requests?: number;
+  readonly env?: Readonly<Record<string, string>>;
+}
+
+async function harnessContextRecords(contextLogPath: string): Promise<{
+  readonly starts: readonly ContextLogRecord[];
+  readonly requests: readonly ContextLogRecord[];
+  readonly exits: readonly ContextLogRecord[];
+}> {
+  const source = await Bun.file(contextLogPath).text();
+  const records = source
+    .trim()
+    .split("\n")
+    .map((line) => JSON.parse(line) as ContextLogRecord);
+  return {
+    starts: records.filter((record) => record.event === "start"),
+    requests: records.filter((record) => record.event === "request"),
+    exits: records.filter((record) => record.event === "exit"),
+  };
 }
 
 function lifecycleArguments(
@@ -427,7 +668,6 @@ test(
       "opencode-harness-events-0.1.0.tgz",
     );
     const fakeExecutable = join(temporaryDirectory, "fake harness-events");
-    const logPath = join(temporaryDirectory, "harness-events.jsonl");
 
     try {
       const build = await runBun(
@@ -535,13 +775,45 @@ await appendFile(
 `,
       );
       await chmod(fakeExecutable, EXECUTABLE_FILE_MODE);
+      const contextLogByMode: Record<ContextContractMode, string> = {
+        enabled: join(temporaryDirectory, "context-enabled.jsonl"),
+        disabled: join(temporaryDirectory, "context-disabled.jsonl"),
+        invalid: join(temporaryDirectory, "context-invalid.jsonl"),
+        worker_failure: join(
+          temporaryDirectory,
+          "context-worker-failure.jsonl",
+        ),
+      };
+      const contextWorkerPath = join(temporaryDirectory, "fake context worker");
+      await Bun.write(
+        contextWorkerPath,
+        contextWorkerScript(contextLogByMode.enabled),
+      );
+      await chmod(contextWorkerPath, EXECUTABLE_FILE_MODE);
+      const failingContextWorkerPath = join(
+        temporaryDirectory,
+        "failing context worker",
+      );
+      await Bun.write(
+        failingContextWorkerPath,
+        failingContextWorkerScript(contextLogByMode.worker_failure),
+      );
+      await chmod(failingContextWorkerPath, EXECUTABLE_FILE_MODE);
       await Bun.write(
         join(consumerDirectory, "load.mjs"),
         `import plugin from "opencode-harness-events";
 
+const mode = process.env.CONTRACT_CONTEXT_MODE;
 const logPath = process.env.HARNESS_EVENTS_TEST_LOG;
+const contextLogPath = process.env.CONTRACT_CONTEXT_LOG;
+if (mode === undefined) {
+  throw new Error("missing contract context mode");
+}
 if (logPath === undefined) {
   throw new Error("missing test log path");
+}
+if (contextLogPath === undefined) {
+  throw new Error("missing context log path");
 }
 
 async function recordCount() {
@@ -560,6 +832,35 @@ async function waitForRecords(count) {
   throw new Error("timed out waiting for " + count + " harness records");
 }
 
+async function contextRecords() {
+  const source = await Bun.file(contextLogPath).text().catch(() => "");
+  return source.trim() === ""
+    ? []
+    : source.trim().split("\\n").map((line) => JSON.parse(line));
+}
+
+async function waitForContext(predicate, description) {
+  const deadline = Date.now() + 5000;
+  while (Date.now() < deadline) {
+    if (predicate(await contextRecords())) {
+      return;
+    }
+    await Bun.sleep(10);
+  }
+  throw new Error("timed out waiting for " + description);
+}
+
+async function waitForContextRecords(eventName, count) {
+  return waitForContext(
+    (records) =>
+      records.filter((record) => record.event === eventName).length >= count,
+    count + " " + eventName + " context records",
+  );
+}
+
+const contextMode = mode === "enabled" || mode === "worker_failure";
+const eagerStarts = [];
+
 const v1Directory = "/contract/v1/project";
 const v1Session = "contract-v1";
 const v1Created = Date.parse("2026-09-20T12:34:56.789Z");
@@ -577,6 +878,10 @@ const v1 = await plugin.server({
     time: { created: v1Created },
   },
 });
+if (contextMode) {
+  await waitForContextRecords("start", 1);
+  eagerStarts.push("v1");
+}
 await v1.event({
   event: { type: "session.created", properties: { info: v1Info } },
 });
@@ -586,10 +891,20 @@ const v1HookInput = { sessionID: v1Session, prompt: "v1-prompt" };
 const v1HookOutput = { role: "assistant", text: "v1-output" };
 await v1["chat.message"](v1HookInput, v1HookOutput);
 await waitForRecords(3);
+
+const v1System = ["kept"];
+await v1["experimental.chat.system.transform"]({ sessionID: v1Session }, { system: v1System });
+let v1SystemStable = true;
+if (contextMode) {
+  const repeated = ["kept"];
+  await v1["experimental.chat.system.transform"]({ sessionID: v1Session }, { system: repeated });
+  v1SystemStable = JSON.stringify(repeated) === JSON.stringify(v1System);
+}
 await v1.event({
   event: { type: "session.deleted", properties: { info: v1Info } },
 });
 await waitForRecords(5);
+await Bun.sleep(100);
 await v1.dispose();
 const v1CountBeforeDispose = await recordCount();
 await v1.event({
@@ -644,6 +959,10 @@ const v2 = await plugin.setup({
     },
   },
 });
+if (contextMode) {
+  await waitForContextRecords("start", 2);
+  eagerStarts.push("v2");
+}
 await waitForRecords(7);
 
 await sessionCallbacks.get("prompt")({
@@ -651,6 +970,15 @@ await sessionCallbacks.get("prompt")({
   prompt: "v2-prompt",
 });
 await waitForRecords(8);
+
+const v2System = [{ type: "text", text: "kept" }];
+await sessionCallbacks.get("context")({ sessionID: v2Session, system: v2System });
+let v2SystemStable = true;
+if (contextMode) {
+  const repeated = [{ type: "text", text: "kept" }];
+  await sessionCallbacks.get("context")({ sessionID: v2Session, system: repeated });
+  v2SystemStable = JSON.stringify(repeated) === JSON.stringify(v2System);
+}
 await toolCallbacks.get("execute.before")({
   sessionID: v2Session,
   tool: "v2-tool",
@@ -658,8 +986,17 @@ await toolCallbacks.get("execute.before")({
 await waitForRecords(9);
 releaseDeletion(v2DeletedEvent);
 await waitForRecords(11);
+await Bun.sleep(100);
 await v2();
 const v2CountBeforeCleanup = await recordCount();
+
+if (mode === "enabled") {
+  await waitForContextRecords("exit", 2);
+}
+if (mode === "worker_failure") {
+  await waitForContextRecords("start", 4);
+}
+
 await sessionCallbacks.get("prompt")({
   sessionID: v2Session,
   prompt: "after-cleanup",
@@ -677,237 +1014,377 @@ console.log(JSON.stringify({
   v1CountAfterCallbacks,
   v2CountBeforeCleanup,
   v2CountAfterCallbacks,
+  eagerStarts: eagerStarts.length,
+  v1System,
+  v1SystemStable,
+  v2System,
+  v2SystemStable,
 }));
 `,
       );
 
-      const consumer = await runBun(["run", "load.mjs"], consumerDirectory, {
-        HARNESS_EVENTS_BIN: fakeExecutable,
-        HARNESS_EVENTS_TEST_LOG: logPath,
-        HARNESS_EVENTS_TIMEOUT_MS: "1000",
-        III_URL: "http://contract.invalid",
-        III_NAMESPACE: "contract",
-      });
-      expect(consumer.exitCode, consumer.stderr || consumer.stdout).toBe(0);
-      const consumerResult = JSON.parse(consumer.stdout) as ConsumerResult;
-      expect(consumerResult).toEqual({
-        disposed: [
-          "session.prompt",
-          "tool.execute.before",
-          "tool.execute.after",
-        ],
-        v1CountBeforeDispose: 5,
-        v1CountAfterCallbacks: 5,
-        v2CountBeforeCleanup: 11,
-        v2CountAfterCallbacks: 11,
-      });
-
-      const records = harnessRecords(await Bun.file(logPath).text());
-      expect(records).toHaveLength(EXPECTED_HARNESS_RECORD_COUNT);
-      for (const record of records) {
-        expect(record.env).toEqual({
+      for (const mode of CONTEXT_MODES) {
+        const harnessLogPath = join(
+          temporaryDirectory,
+          `harness-${mode}.jsonl`,
+        );
+        const contextLogPath = contextLogByMode[mode];
+        const consumer = await runBun(["run", "load.mjs"], consumerDirectory, {
+          HARNESS_EVENTS_BIN: fakeExecutable,
+          HARNESS_EVENTS_TEST_LOG: harnessLogPath,
+          HARNESS_EVENTS_TIMEOUT_MS: "1000",
           III_URL: "http://contract.invalid",
           III_NAMESPACE: "contract",
+          CONTRACT_CONTEXT_LOG: contextLogPath,
+          ...modeEnvironment(mode, contextWorkerPath, failingContextWorkerPath),
         });
-      }
+        expect(consumer.exitCode, consumer.stderr || consumer.stdout).toBe(0);
+        if (mode === "invalid") {
+          expect(consumer.stderr.trim().split("\n")).toEqual([
+            CONTEXT_CONFIG_DIAGNOSTIC,
+            CONTEXT_CONFIG_DIAGNOSTIC,
+          ]);
+        } else {
+          expect(consumer.stderr.trim()).toBe("");
+        }
 
-      const v1Info = {
-        id: "contract-v1",
-        directory: "/contract/v1/project",
-        time: {
-          created: Date.parse("2026-09-20T12:34:56.789Z"),
-          updated: Date.parse("2026-09-20T12:34:57.789Z"),
-        },
-      };
-      const v1Directory = "/contract/v1/project";
-      const v1Session = "contract-v1";
-      const v2Directory = "/contract/v2/project";
-      const v2Session = "contract-v2";
-      const v1CreatedTimestamp = "2026-09-20T12:34:56.789Z";
-      const v1DeletedTimestamp = "2026-09-20T12:34:57.789Z";
-      const v2CreatedTimestamp = "2026-09-20T14:34:56.789Z";
-      const v2DeletedTimestamp = "2026-09-20T14:34:57.789Z";
-      expect(recordAt(records, V1_START_RECORD_INDEX).args).toEqual(
-        lifecycleArguments(
-          "session-start",
-          v1Session,
-          v1Directory,
-          v1CreatedTimestamp,
-        ),
-      );
-      expect(recordAt(records, V1_START_RECORD_INDEX).stdin).toBe("");
-      expect(recordAt(records, V1_CREATED_RECORD_INDEX).args).toEqual(
-        observationArguments(
-          "opencode.v1.session.created",
-          v1Session,
-          v1Directory,
-          v1CreatedTimestamp,
-        ),
-      );
-      expect(recordAt(records, V1_CREATED_RECORD_INDEX).stdin).toBe(
-        JSON.stringify({
-          source: "opencode",
-          generation: "v1",
-          kind: "session.created",
-          payload: { info: v1Info },
-        }),
-      );
-      expect(
-        recordAt(records, V1_HOOK_RECORD_INDEX).args as readonly unknown[],
-      ).toEqual([
-        "observation",
-        "--hook-type",
-        "opencode.v1.chat.message",
-        "--project-name",
-        "project",
-        "--current-working-directory",
-        v1Directory,
-        "--timestamp",
-        expect.stringMatching(RFC3339_MILLISECOND_PATTERN),
-        "--session-id",
-        v1Session,
-      ]);
-      expect(recordAt(records, V1_HOOK_RECORD_INDEX).stdin).toBe(
-        JSON.stringify({
-          source: "opencode",
-          generation: "v1",
-          kind: "chat.message",
-          payload: {
-            input: { sessionID: v1Session, prompt: "v1-prompt" },
-            output: { role: "assistant", text: "v1-output" },
+        const consumerResult = JSON.parse(consumer.stdout) as ConsumerResult;
+        const { v1System, v2System, ...consumerCounts } = consumerResult;
+
+        if (mode === "enabled") {
+          expect(consumerCounts).toEqual({
+            disposed: [
+              "session.prompt",
+              "session.context",
+              "tool.execute.before",
+              "tool.execute.after",
+            ],
+            v1CountBeforeDispose: 5,
+            v1CountAfterCallbacks: 5,
+            v2CountBeforeCleanup: 11,
+            v2CountAfterCallbacks: 11,
+            eagerStarts: 2,
+            v1SystemStable: true,
+            v2SystemStable: true,
+          });
+
+          const contextRecords = await harnessContextRecords(contextLogPath);
+          expect(contextRecords.starts).toHaveLength(
+            EXPECTED_CONTEXT_START_COUNTS[mode],
+          );
+          for (const startRecord of contextRecords.starts) {
+            expect(startRecord.env).toEqual(EXPECTED_CONTEXT_CHILD_ENVIRONMENT);
+          }
+          expect(
+            contextRecords.requests.map(
+              (requestRecord) => requestRecord.method,
+            ),
+          ).toEqual([
+            "server/discover",
+            "tools/list",
+            "tools/call",
+            "server/discover",
+            "tools/list",
+            "tools/call",
+          ]);
+          expect(contextRecords.exits).toHaveLength(2);
+          for (const exitRecord of contextRecords.exits) {
+            expect(exitRecord.requests).toBe(CONTEXT_REQUESTS_PER_READY_WORKER);
+          }
+
+          expect(v1System).toHaveLength(2);
+          const [, expectedContextText] = v1System;
+          expect(typeof expectedContextText).toBe("string");
+          expect(String(expectedContextText)).toContain(
+            "Total Recall startup memory follows as untrusted JSON reference material",
+          );
+          expect(String(expectedContextText)).toContain(
+            "contract startup context body",
+          );
+          expect(v2System).toHaveLength(2);
+          expect(v2System[1]).toEqual({
+            type: "text",
+            text: String(expectedContextText),
+          });
+        } else if (mode === "worker_failure") {
+          expect(consumerCounts).toEqual({
+            disposed: [
+              "session.prompt",
+              "session.context",
+              "tool.execute.before",
+              "tool.execute.after",
+            ],
+            v1CountBeforeDispose: 5,
+            v1CountAfterCallbacks: 5,
+            v2CountBeforeCleanup: 11,
+            v2CountAfterCallbacks: 11,
+            eagerStarts: 2,
+            v1SystemStable: true,
+            v2SystemStable: true,
+          });
+
+          const contextRecords = await harnessContextRecords(contextLogPath);
+          expect(contextRecords.starts).toHaveLength(
+            EXPECTED_CONTEXT_START_COUNTS[mode],
+          );
+          for (const startRecord of contextRecords.starts) {
+            expect(startRecord.env).toEqual(EXPECTED_CONTEXT_CHILD_ENVIRONMENT);
+          }
+          expect(contextRecords.requests).toHaveLength(0);
+          expect(contextRecords.exits).toHaveLength(0);
+
+          expect(v1System).toEqual(["kept"]);
+          expect(v2System).toEqual([{ type: "text", text: "kept" }]);
+        } else {
+          expect(consumerCounts).toEqual({
+            disposed: [
+              "session.prompt",
+              "session.context",
+              "tool.execute.before",
+              "tool.execute.after",
+            ],
+            v1CountBeforeDispose: 5,
+            v1CountAfterCallbacks: 5,
+            v2CountBeforeCleanup: 11,
+            v2CountAfterCallbacks: 11,
+            eagerStarts: 0,
+            v1SystemStable: true,
+            v2SystemStable: true,
+          });
+          expect(await Bun.file(contextLogPath).exists()).toBe(false);
+          expect(v1System).toEqual(["kept"]);
+          expect(v2System).toEqual([{ type: "text", text: "kept" }]);
+        }
+
+        const records = harnessRecords(await Bun.file(harnessLogPath).text());
+        expect(records).toHaveLength(EXPECTED_HARNESS_RECORD_COUNT);
+        for (const record of records) {
+          expect(record.env).toEqual({
+            III_URL: "http://contract.invalid",
+            III_NAMESPACE: "contract",
+          });
+        }
+
+        const v1Info = {
+          id: "contract-v1",
+          directory: "/contract/v1/project",
+          time: {
+            created: Date.parse("2026-09-20T12:34:56.789Z"),
+            updated: Date.parse("2026-09-20T12:34:57.789Z"),
           },
-        }),
-      );
-      expect(recordAt(records, V1_DELETED_RECORD_INDEX).args).toEqual(
-        observationArguments(
-          "opencode.v1.session.deleted",
-          v1Session,
+        };
+        const v1Directory = "/contract/v1/project";
+        const v1Session = "contract-v1";
+        const v2Directory = "/contract/v2/project";
+        const v2Session = "contract-v2";
+        const v1CreatedTimestamp = "2026-09-20T12:34:56.789Z";
+        const v1DeletedTimestamp = "2026-09-20T12:34:57.789Z";
+        const v2CreatedTimestamp = "2026-09-20T14:34:56.789Z";
+        const v2DeletedTimestamp = "2026-09-20T14:34:57.789Z";
+        expect(recordAt(records, V1_START_RECORD_INDEX).args).toEqual(
+          lifecycleArguments(
+            "session-start",
+            v1Session,
+            v1Directory,
+            v1CreatedTimestamp,
+          ),
+        );
+        expect(recordAt(records, V1_START_RECORD_INDEX).stdin).toBe("");
+        expect(recordAt(records, V1_CREATED_RECORD_INDEX).args).toEqual(
+          observationArguments(
+            "opencode.v1.session.created",
+            v1Session,
+            v1Directory,
+            v1CreatedTimestamp,
+          ),
+        );
+        expect(recordAt(records, V1_CREATED_RECORD_INDEX).stdin).toBe(
+          JSON.stringify({
+            source: "opencode",
+            generation: "v1",
+            kind: "session.created",
+            payload: { info: v1Info },
+          }),
+        );
+        expect(
+          recordAt(records, V1_HOOK_RECORD_INDEX).args as readonly unknown[],
+        ).toEqual([
+          "observation",
+          "--hook-type",
+          "opencode.v1.chat.message",
+          "--project-name",
+          "project",
+          "--current-working-directory",
           v1Directory,
-          v1DeletedTimestamp,
-        ),
-      );
-      expect(recordAt(records, V1_DELETED_RECORD_INDEX).stdin).toBe(
-        JSON.stringify({
-          source: "opencode",
-          generation: "v1",
-          kind: "session.deleted",
-          payload: { info: v1Info },
-        }),
-      );
-      expect(recordAt(records, V1_END_RECORD_INDEX).args).toEqual(
-        lifecycleArguments(
-          "session-end",
+          "--timestamp",
+          expect.stringMatching(RFC3339_MILLISECOND_PATTERN),
+          "--session-id",
           v1Session,
-          v1Directory,
-          v1DeletedTimestamp,
-        ),
-      );
-      expect(recordAt(records, V1_END_RECORD_INDEX).stdin).toBe("");
+        ]);
+        expect(recordAt(records, V1_HOOK_RECORD_INDEX).stdin).toBe(
+          JSON.stringify({
+            source: "opencode",
+            generation: "v1",
+            kind: "chat.message",
+            payload: {
+              input: { sessionID: v1Session, prompt: "v1-prompt" },
+              output: { role: "assistant", text: "v1-output" },
+            },
+          }),
+        );
+        expect(recordAt(records, V1_DELETED_RECORD_INDEX).args).toEqual(
+          observationArguments(
+            "opencode.v1.session.deleted",
+            v1Session,
+            v1Directory,
+            v1DeletedTimestamp,
+          ),
+        );
+        expect(recordAt(records, V1_DELETED_RECORD_INDEX).stdin).toBe(
+          JSON.stringify({
+            source: "opencode",
+            generation: "v1",
+            kind: "session.deleted",
+            payload: { info: v1Info },
+          }),
+        );
+        expect(recordAt(records, V1_END_RECORD_INDEX).args).toEqual(
+          lifecycleArguments(
+            "session-end",
+            v1Session,
+            v1Directory,
+            v1DeletedTimestamp,
+          ),
+        );
+        expect(recordAt(records, V1_END_RECORD_INDEX).stdin).toBe("");
 
-      const v2CreatedData = { sessionID: v2Session, state: "created" };
-      const v2DeletedData = { sessionID: v2Session, state: "deleted" };
-      expect(recordAt(records, V2_START_RECORD_INDEX).args).toEqual(
-        lifecycleArguments(
-          "session-start",
-          v2Session,
+        const v2CreatedData = { sessionID: v2Session, state: "created" };
+        const v2DeletedData = { sessionID: v2Session, state: "deleted" };
+        expect(recordAt(records, V2_START_RECORD_INDEX).args).toEqual(
+          lifecycleArguments(
+            "session-start",
+            v2Session,
+            v2Directory,
+            v2CreatedTimestamp,
+          ),
+        );
+        expect(recordAt(records, V2_START_RECORD_INDEX).stdin).toBe("");
+        expect(recordAt(records, V2_CREATED_RECORD_INDEX).args).toEqual(
+          observationArguments(
+            "opencode.v2.session.created",
+            v2Session,
+            v2Directory,
+            v2CreatedTimestamp,
+          ),
+        );
+        expect(recordAt(records, V2_CREATED_RECORD_INDEX).stdin).toBe(
+          JSON.stringify({
+            source: "opencode",
+            generation: "v2",
+            kind: "session.created",
+            payload: v2CreatedData,
+          }),
+        );
+        expect(
+          recordAt(records, V2_PROMPT_RECORD_INDEX).args as readonly unknown[],
+        ).toEqual([
+          "observation",
+          "--hook-type",
+          "opencode.v2.session.prompt",
+          "--project-name",
+          "project",
+          "--current-working-directory",
           v2Directory,
-          v2CreatedTimestamp,
-        ),
-      );
-      expect(recordAt(records, V2_START_RECORD_INDEX).stdin).toBe("");
-      expect(recordAt(records, V2_CREATED_RECORD_INDEX).args).toEqual(
-        observationArguments(
-          "opencode.v2.session.created",
+          "--timestamp",
+          expect.stringMatching(RFC3339_MILLISECOND_PATTERN),
+          "--session-id",
           v2Session,
+        ]);
+        expect(recordAt(records, V2_PROMPT_RECORD_INDEX).stdin).toBe(
+          JSON.stringify({
+            source: "opencode",
+            generation: "v2",
+            kind: "session.prompt",
+            payload: { sessionID: v2Session, prompt: "v2-prompt" },
+          }),
+        );
+        expect(
+          recordAt(records, V2_TOOL_RECORD_INDEX).args as readonly unknown[],
+        ).toEqual([
+          "observation",
+          "--hook-type",
+          "opencode.v2.tool.execute.before",
+          "--project-name",
+          "project",
+          "--current-working-directory",
           v2Directory,
-          v2CreatedTimestamp,
-        ),
-      );
-      expect(recordAt(records, V2_CREATED_RECORD_INDEX).stdin).toBe(
-        JSON.stringify({
-          source: "opencode",
-          generation: "v2",
-          kind: "session.created",
-          payload: v2CreatedData,
-        }),
-      );
-      expect(
-        recordAt(records, V2_PROMPT_RECORD_INDEX).args as readonly unknown[],
-      ).toEqual([
-        "observation",
-        "--hook-type",
-        "opencode.v2.session.prompt",
-        "--project-name",
-        "project",
-        "--current-working-directory",
-        v2Directory,
-        "--timestamp",
-        expect.stringMatching(RFC3339_MILLISECOND_PATTERN),
-        "--session-id",
-        v2Session,
-      ]);
-      expect(recordAt(records, V2_PROMPT_RECORD_INDEX).stdin).toBe(
-        JSON.stringify({
-          source: "opencode",
-          generation: "v2",
-          kind: "session.prompt",
-          payload: { sessionID: v2Session, prompt: "v2-prompt" },
-        }),
-      );
-      expect(
-        recordAt(records, V2_TOOL_RECORD_INDEX).args as readonly unknown[],
-      ).toEqual([
-        "observation",
-        "--hook-type",
-        "opencode.v2.tool.execute.before",
-        "--project-name",
-        "project",
-        "--current-working-directory",
-        v2Directory,
-        "--timestamp",
-        expect.stringMatching(RFC3339_MILLISECOND_PATTERN),
-        "--session-id",
-        v2Session,
-      ]);
-      expect(recordAt(records, V2_TOOL_RECORD_INDEX).stdin).toBe(
-        JSON.stringify({
-          source: "opencode",
-          generation: "v2",
-          kind: "tool.execute.before",
-          payload: { sessionID: v2Session, tool: "v2-tool" },
-        }),
-      );
-      expect(recordAt(records, V2_DELETED_RECORD_INDEX).args).toEqual(
-        observationArguments(
-          "opencode.v2.session.deleted",
+          "--timestamp",
+          expect.stringMatching(RFC3339_MILLISECOND_PATTERN),
+          "--session-id",
           v2Session,
-          v2Directory,
-          v2DeletedTimestamp,
-        ),
-      );
-      expect(recordAt(records, V2_DELETED_RECORD_INDEX).stdin).toBe(
-        JSON.stringify({
-          source: "opencode",
-          generation: "v2",
-          kind: "session.deleted",
-          payload: v2DeletedData,
-        }),
-      );
-      expect(recordAt(records, V2_END_RECORD_INDEX).args).toEqual(
-        lifecycleArguments(
-          "session-end",
-          v2Session,
-          v2Directory,
-          v2DeletedTimestamp,
-        ),
-      );
-      expect(recordAt(records, V2_END_RECORD_INDEX).stdin).toBe("");
+        ]);
+        expect(recordAt(records, V2_TOOL_RECORD_INDEX).stdin).toBe(
+          JSON.stringify({
+            source: "opencode",
+            generation: "v2",
+            kind: "tool.execute.before",
+            payload: { sessionID: v2Session, tool: "v2-tool" },
+          }),
+        );
+        expect(recordAt(records, V2_DELETED_RECORD_INDEX).args).toEqual(
+          observationArguments(
+            "opencode.v2.session.deleted",
+            v2Session,
+            v2Directory,
+            v2DeletedTimestamp,
+          ),
+        );
+        expect(recordAt(records, V2_DELETED_RECORD_INDEX).stdin).toBe(
+          JSON.stringify({
+            source: "opencode",
+            generation: "v2",
+            kind: "session.deleted",
+            payload: v2DeletedData,
+          }),
+        );
+        expect(recordAt(records, V2_END_RECORD_INDEX).args).toEqual(
+          lifecycleArguments(
+            "session-end",
+            v2Session,
+            v2Directory,
+            v2DeletedTimestamp,
+          ),
+        );
+        expect(recordAt(records, V2_END_RECORD_INDEX).stdin).toBe("");
+      }
     } finally {
       await rm(temporaryDirectory, { force: true, recursive: true });
     }
   },
   PACKAGE_ARTIFACT_TEST_TIMEOUT_MS,
 );
+
+test("repository contract: documents context opt-in settings without bundled workers", async () => {
+  const readme = await Bun.file(`${packageRoot}/README.md`).text();
+
+  const documentedVariables = [
+    "TOTAL_RECALL_CONTEXT_BIN",
+    "TOTAL_RECALL_MEMORY_DATABASE",
+    "TOTAL_RECALL_CONTEXT_LIMIT",
+    "TOTAL_RECALL_CONTEXT_MAX_FRAME_BYTES",
+    "TOTAL_RECALL_CONTEXT_MAX_PENDING",
+    "TOTAL_RECALL_CONTEXT_MAX_INJECTION_BYTES",
+    "TOTAL_RECALL_CONTEXT_DIAGNOSTIC_BYTES",
+    "TOTAL_RECALL_CONTEXT_STARTUP_TIMEOUT_MS",
+    "TOTAL_RECALL_CONTEXT_LOOKUP_TIMEOUT_MS",
+    "TOTAL_RECALL_CONTEXT_SHUTDOWN_TIMEOUT_MS",
+  ];
+  for (const variable of documentedVariables) {
+    expect(readme).toContain(variable);
+  }
+  expect(readme).toContain("Absent means disabled");
+  expect(readme).toContain("never bundled");
+});
 
 test("repository contract: monitors the package with weekly Bun Dependabot updates", async () => {
   const dependabot = await Bun.file(

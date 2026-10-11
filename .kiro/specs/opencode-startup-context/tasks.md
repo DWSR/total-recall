@@ -131,7 +131,7 @@
   - _Depends: 3.8_
   - _Requirements: 5.1, 5.9, 5.12, 5.13, 5.14, 6.3, 6.4, 6.5, 6.6, 6.9, 7.2, 7.3, 7.4, 7.5_
   - _Boundary: V2 Adapter_
-- [ ] 4.3 Compose context and capture lifecycles
+- [x] 4.3 Compose context and capture lifecycles
   - Build context beside the unchanged capture runtime, start enabled retrieval eagerly, and route session deletion to both state owners.
   - On unload, close both runtimes independently under the shared outer bound so one failure cannot suppress the other's cleanup.
   - Update and contract-test the package settings table, clean-consumer environment contract, and packed artifact allowlist for enabled, disabled, and invalid context modes.
