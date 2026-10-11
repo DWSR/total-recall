@@ -149,7 +149,7 @@
   - _Depends: 2.3, 4.3_
   - _Requirements: 4.9, 7.4, 8.3, 8.6, 8.7, 8.11_
   - _Boundary: Context Verification Harness, Process Guard_
-- [ ] 5.2 Extend the real iii engine with deterministic context data
+- [x] 5.2 Extend the real iii engine with deterministic context data
   - Register exact database execution behavior alongside existing harness capture and script ordered context success, empty, backend failure, malformed, and delayed replies.
   - Capture database requests and lookup counts without exposing context fields in harness errors.
   - Completion is observable when an engine test reaches six-tool readiness, serves one exact context call, and preserves every existing capture function.
