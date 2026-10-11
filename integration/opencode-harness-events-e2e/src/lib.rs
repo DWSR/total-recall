@@ -17,6 +17,7 @@ pub mod context_worker;
 pub mod engine;
 pub mod opencode;
 pub mod process;
+pub mod provider;
 
 pub use context_worker::{
     ContextWorkerError, ContextWorkerExit, ContextWorkerOutcome, ContextWorkerProcess,
@@ -30,6 +31,14 @@ pub use opencode::{
 pub use process::{
     CaptureStream, ProcessDeadlines, ProcessError, ProcessGuard, ProcessIdentity, ProcessOutput,
     ProcessPhase, ProcessSpec, TerminationSignal,
+};
+pub use provider::{
+    AssistantApiFailure, AssistantCompletion, AssistantOperation, ModelRequestRecord,
+    OPENCODE_BUNDLED_COMPATIBLE_NPM, OPENCODE_MESSAGE_ROUTE, OPENCODE_MODEL_ID,
+    OPENCODE_PROVIDER_ID, OPENCODE_PROVIDER_NAME, OPENCODE_REPLY_TEXT,
+    OfflineAssistantCompletionError, OfflineModelRecorder, OfflineModelRecorderError,
+    OfflineModelRecorderRejection, OfflineProviderBinding, drive_v1_message_completion,
+    drive_v2_prompt_completion,
 };
 
 const III_BIN: &str = "III_BIN";

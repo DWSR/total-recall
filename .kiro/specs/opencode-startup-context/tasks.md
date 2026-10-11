@@ -156,7 +156,7 @@
   - _Depends: 5.1_
   - _Requirements: 3.5, 3.6, 4.7, 7.4, 8.3, 8.11_
   - _Boundary: Context Verification Harness, Engine Harness_
-- [ ] 5.3 Add the offline model recorder and host controls
+- [x] 5.3 Add the offline model recorder and host controls
   - Configure both pinned hosts with their bundled compatible providers at one authenticated loopback endpoint and deterministic streaming completion.
   - Add exact v1 message completion and v2 prompt-plus-wait controls and reject unknown route, bearer, model, stream, or request count.
   - Completion is observable when infrastructure tests drive one assistant completion per generation and record provider-visible system bytes without external services.
@@ -219,3 +219,4 @@
 - Reopened task 3.5 after task 3.6 exposed a response-pump ownership defect; generation-scoped pumps now keep failed generations from blocking replacements.
 - Task 3.7 review: task 3.8 should assert frozen-empty repeat results (no second lookup after empty/failed freeze) and consider guarding synchronous `transport.request` throws at the runtime seam.
 - The suite red on `test/package-contract.test.ts` "packs an allowlisted package" is pre-existing: `BUILT_MODULES`/`expectedArtifactFiles()` lack the four context modules added in tasks 3.5–3.7; extending the packed artifact allowlist is task 4.3's deliverable. Treat as boundary-external until 4.3.
+- Task 5.3 recorder notes for task 5.5: the recorder model literal is `harness-recorder-model` (not the design's `test-model` placeholder; exact-model validation is the enforced property); the v2 host binds the recorder through the same `provider`/`npm`/`options` config shape as v1, empirically validated live on both pinned hosts; each fresh v1/v2 session deterministically produces two provider requests (host-forked title completion plus the driven assistant turn), and the live pinned-host drives live in `tests/provider_live.rs` as `#[ignore]`-gated tests requiring `OPENCODE_V1_BIN`/`OPENCODE_V2_BIN`.
