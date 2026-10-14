@@ -78,6 +78,33 @@ nix build --print-build-logs --no-link .#postgresql17-memory-search-heads-verify
 nix build --print-build-logs --no-link .#postgresql18-memory-search-heads-verify
 ```
 
+## Current Head Recency
+
+The head-recency migration (`0002_memory_search_head_recency.sql`) records the
+selected canonical memory's update time on each current head, backfills the
+exact selected versions, replaces the secured head-maintenance trigger, and
+validates the non-null column. The verifier seeds a baseline, proves that an
+unbounded maintenance window and both a lock timeout and a statement timeout
+roll the migration back with the baseline unchanged, then applies the migration
+with finite limits and checks backfill, greater-version advancement,
+lower-version stability, privileges, and old-reader compatibility.
+
+Run it directly with the existing Git-backed server packages and fixture setup:
+
+```sh
+postgresql17="$(nix build --no-link --print-out-paths .#postgresql17-search)"
+MEMORY_SCHEMA_MIGRATION="$PWD/crates/memory-store/migrations/0001_memory_schema_search.sql" \
+MEMORY_RECENCY_MIGRATION="$PWD/crates/memory-store/migrations/0002_memory_search_head_recency.sql" \
+  bash integration/memory-postgres-smoke/scripts/setup.sh "$postgresql17/bin" 17 -- \
+  bash integration/memory-postgres-smoke/scripts/verify-memory-head-recency.sh
+
+postgresql18="$(nix build --no-link --print-out-paths .#postgresql18-search)"
+MEMORY_SCHEMA_MIGRATION="$PWD/crates/memory-store/migrations/0001_memory_schema_search.sql" \
+MEMORY_RECENCY_MIGRATION="$PWD/crates/memory-store/migrations/0002_memory_search_head_recency.sql" \
+  bash integration/memory-postgres-smoke/scripts/setup.sh "$postgresql18/bin" 18 -- \
+  bash integration/memory-postgres-smoke/scripts/verify-memory-head-recency.sh
+```
+
 ## Embedding Lifecycle
 
 Task 5.2 verifies committed parent-before-child ordering, historical and
