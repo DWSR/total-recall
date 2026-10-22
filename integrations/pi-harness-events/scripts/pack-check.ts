@@ -110,7 +110,7 @@ function assertPackageManifest(value: unknown): string {
     throw new Error("installed package manifest does not declare the source package allowlist");
   }
 
-  if (!hasExactStringRecord(value.dependencies, {})) {
+  if (value.dependencies !== undefined && !hasExactStringRecord(value.dependencies, {})) {
     throw new Error("installed package manifest has production dependencies");
   }
 
@@ -125,7 +125,7 @@ function assertPackageManifest(value: unknown): string {
     throw new Error("installed package manifest does not declare the Pi peer dependency");
   }
 
-  if (!hasStringRecordEntry(value.devDependencies, "@earendil-works/pi-coding-agent", "1.0.0")) {
+  if (!hasStringRecordEntry(value.devDependencies, "@earendil-works/pi-coding-agent", "1.2.0")) {
     throw new Error("installed package manifest does not pin Pi for development verification");
   }
 
