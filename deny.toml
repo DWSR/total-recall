@@ -1,5 +1,8 @@
 [advisories]
 version = 2
+# unsafe-libyaml (via deprecated serde_yaml, used by integration engine fakes)
+# is unmaintained with no safe upgrade; replacing it is a separate migration.
+ignore = ["RUSTSEC-2024-0449"]
 
 [licenses]
 version = 2

@@ -30,9 +30,6 @@ jobs:
       - name: Install Nix
         uses: DeterminateSystems/nix-installer-action@main
 
-      - name: Configure Nix cache
-        uses: DeterminateSystems/magic-nix-cache-action@main
-
       - name: Report initial disk usage
         run: df -h . /nix/store
 
@@ -160,9 +157,6 @@ jobs:
       - name: Install Nix
         uses: DeterminateSystems/nix-installer-action@main
 
-      - name: Configure Nix cache
-        uses: DeterminateSystems/magic-nix-cache-action@main
-
       - name: Verify package and live Pi integration
         shell: bash
         run: |
@@ -272,9 +266,6 @@ jobs:
       - name: Install Nix
         uses: DeterminateSystems/nix-installer-action@main
 
-      - name: Configure Nix cache
-        uses: DeterminateSystems/magic-nix-cache-action@main
-
       - name: Run direct PostgreSQL verifiers
         run: >-
           nix build --print-build-logs --no-link
@@ -308,9 +299,6 @@ jobs:
 
       - name: Install Nix
         uses: DeterminateSystems/nix-installer-action@main
-
-      - name: Configure Nix cache
-        uses: DeterminateSystems/magic-nix-cache-action@main
 
       - name: Run protocol tests
         run: nix develop --command cargo test -p memory-database-engine-fake --locked
