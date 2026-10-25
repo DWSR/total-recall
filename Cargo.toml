@@ -46,7 +46,7 @@ rkyv = "=0.8.18"
 # bounds need the 0.8 JsonSchema trait, which schemars 1.x does not implement.
 schemars = { version = "=0.8.22", features = ["derive"] }
 serde = { version = "=1.0.229", features = ["derive"] }
-serde_json = "=1.0.151"
+serde_json = "=1.0.154"
 sha2 = "=0.11.0"
 serde_yaml = "=0.9.34"
 thiserror = "=2.0.21"
