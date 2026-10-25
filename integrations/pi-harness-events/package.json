@@ -43,7 +43,7 @@
   },
   "dependencies": {},
   "devDependencies": {
-    "@biomejs/biome": "2.5.14",
+    "@biomejs/biome": "2.5.15",
     "@earendil-works/pi-coding-agent": "1.0.0",
     "@types/node": "26.6.5",
     "prettier": "3.9.10",
