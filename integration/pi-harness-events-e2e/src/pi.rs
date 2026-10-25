@@ -132,10 +132,10 @@ pub async fn run_headless_pi_with_engine(
     let working_directory =
         fs::canonicalize(roots.path("work")).map_err(|_| PiScenarioError::SetupFailed)?;
 
-    verify_node_version(&artifacts).await?;
-    verify_pi_version(&artifacts).await?;
-    verify_iii_version(&artifacts).await?;
-    verify_harness_events_identity(&artifacts).await?;
+    verify_node_version(&artifacts, &roots).await?;
+    verify_pi_version(&artifacts, &roots).await?;
+    verify_iii_version(&artifacts, &roots).await?;
+    verify_harness_events_identity(&artifacts, &roots).await?;
 
     let mut command = Command::new(&artifacts.node);
     command
@@ -263,9 +263,16 @@ fn validate_pi_cli(pi_cli: &Path) -> Result<(), PiScenarioError> {
     }
 }
 
-async fn verify_node_version(artifacts: &ArtifactPaths) -> Result<(), PiScenarioError> {
+async fn verify_node_version(
+    artifacts: &ArtifactPaths,
+    roots: &IsolatedRoots,
+) -> Result<(), PiScenarioError> {
     let mut command = Command::new(&artifacts.node);
-    command.arg("--version").env_clear().stdin(Stdio::null());
+    command
+        .arg("--version")
+        .env_clear()
+        .env("HOME", roots.path("home"))
+        .stdin(Stdio::null());
     if is_node_24(&run_probe_command(&mut command).await?) {
         Ok(())
     } else {
@@ -273,12 +280,16 @@ async fn verify_node_version(artifacts: &ArtifactPaths) -> Result<(), PiScenario
     }
 }
 
-async fn verify_pi_version(artifacts: &ArtifactPaths) -> Result<(), PiScenarioError> {
+async fn verify_pi_version(
+    artifacts: &ArtifactPaths,
+    roots: &IsolatedRoots,
+) -> Result<(), PiScenarioError> {
     let mut command = Command::new(&artifacts.node);
     command
         .arg(&artifacts.pi_cli)
         .arg("--version")
         .env_clear()
+        .env("HOME", roots.path("home"))
         .stdin(Stdio::null());
     if is_pi_1_0_0(&run_probe_command(&mut command).await?) {
         Ok(())
@@ -287,9 +298,16 @@ async fn verify_pi_version(artifacts: &ArtifactPaths) -> Result<(), PiScenarioEr
     }
 }
 
-async fn verify_iii_version(artifacts: &ArtifactPaths) -> Result<(), PiScenarioError> {
+async fn verify_iii_version(
+    artifacts: &ArtifactPaths,
+    roots: &IsolatedRoots,
+) -> Result<(), PiScenarioError> {
     let mut command = Command::new(&artifacts.iii);
-    command.arg("--version").env_clear().stdin(Stdio::null());
+    command
+        .arg("--version")
+        .env_clear()
+        .env("HOME", roots.path("home"))
+        .stdin(Stdio::null());
     if is_iii_024(&run_probe_command(&mut command).await?) {
         Ok(())
     } else {
@@ -297,9 +315,16 @@ async fn verify_iii_version(artifacts: &ArtifactPaths) -> Result<(), PiScenarioE
     }
 }
 
-async fn verify_harness_events_identity(artifacts: &ArtifactPaths) -> Result<(), PiScenarioError> {
+async fn verify_harness_events_identity(
+    artifacts: &ArtifactPaths,
+    roots: &IsolatedRoots,
+) -> Result<(), PiScenarioError> {
     let mut command = Command::new(&artifacts.harness_events);
-    command.arg("--help").env_clear().stdin(Stdio::null());
+    command
+        .arg("--help")
+        .env_clear()
+        .env("HOME", roots.path("home"))
+        .stdin(Stdio::null());
     if !is_harness_events_help(&run_probe_command(&mut command).await?) {
         return Err(PiScenarioError::InvalidArtifact);
     }
@@ -313,7 +338,11 @@ async fn verify_harness_events_identity(artifacts: &ArtifactPaths) -> Result<(),
         (&["session-end", "--help"], HARNESS_EVENTS_SESSION_END_HELP),
     ] {
         let mut command = Command::new(&artifacts.harness_events);
-        command.args(arguments).env_clear().stdin(Stdio::null());
+        command
+            .args(arguments)
+            .env_clear()
+            .env("HOME", roots.path("home"))
+            .stdin(Stdio::null());
         if !has_harness_events_help_grammar(&run_probe_command(&mut command).await?, expected) {
             return Err(PiScenarioError::InvalidArtifact);
         }
