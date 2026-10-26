@@ -266,7 +266,7 @@ stop_snapshot_holder() {
 }
 
 start_index_build() {
-	build_log="$(mktemp "${TMPDIR:-/tmp}/memory-context-index-build.XXXXXX")"
+	build_log="$(mktemp)"
 	PGAPPNAME='memory-context-index-build' "$psql" \
 		--no-psqlrc \
 		--no-password \
