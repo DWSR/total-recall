@@ -14,6 +14,7 @@ const packagedFiles = [
   "src/adapter.ts",
   "src/config.ts",
   "src/context-config.ts",
+  "src/context-format.ts",
   "src/context-model.ts",
   "src/dispatcher.ts",
   "src/index.ts",
