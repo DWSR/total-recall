@@ -7,7 +7,7 @@
   - Completion is observable when a clean install resolves the exact development host and package checks reject peer or Node drift.
   - _Requirements: 8.1, 8.2, 8.3_
   - _Boundary: Package Contract_
-- [ ] 1.2 Define strict startup-context contracts
+- [x] 1.2 Define strict startup-context contracts
   - Define the narrow four-field memory record, frozen outcomes, transport failures, diagnostic categories, and whole-result decode outcome.
   - Reject unknown, accessor-backed, sparse, malformed, or over-limit records before they reach formatting or host hooks.
   - Completion is observable when exact valid records decode and every protected or malformed shape fails as one complete result with no partial data.
