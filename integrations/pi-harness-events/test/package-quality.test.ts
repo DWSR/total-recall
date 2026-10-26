@@ -10,6 +10,57 @@ const packageRoot = fileURLToPath(new URL("../", import.meta.url));
 const packageJsonPath = fileURLToPath(new URL("../package.json", import.meta.url));
 const readmePath = fileURLToPath(new URL("../README.md", import.meta.url));
 const npmCli = process.env.npm_execpath;
+const piPackageName = "@earendil-works/pi-coding-agent";
+const supportedPiVersion = "0.86.1";
+
+function isManifestObject(value: unknown): value is Record<string, unknown> {
+  return typeof value === "object" && value !== null && !Array.isArray(value);
+}
+
+function assertManifestObject(value: unknown, message: string): Record<string, unknown> {
+  assert.ok(isManifestObject(value), message);
+  return value;
+}
+
+async function readPackageManifest(): Promise<Record<string, unknown>> {
+  return assertManifestObject(
+    JSON.parse(await readFile(packageJsonPath, "utf8")),
+    "package.json must contain an object",
+  );
+}
+
+function runPackCheck(npmCliPath: string): {
+  readonly status: number | null;
+  readonly output: string;
+} {
+  const result = spawnSync(process.execPath, [npmCliPath, "run", "pack:check"], {
+    cwd: packageRoot,
+    encoding: "utf8",
+  });
+
+  assert.equal(result.error, undefined, result.error?.message ?? "spawn failed");
+
+  return { status: result.status, output: `${result.stdout}\n${result.stderr}` };
+}
+
+async function withPackageManifest(
+  mutate: (manifest: Record<string, unknown>) => void,
+  run: () => void,
+): Promise<void> {
+  const originalPackageJson = await readFile(packageJsonPath, "utf8");
+
+  try {
+    const manifest = assertManifestObject(
+      JSON.parse(originalPackageJson),
+      "package.json must contain an object",
+    );
+    mutate(manifest);
+    await writeFile(packageJsonPath, `${JSON.stringify(manifest, null, 2)}\n`, "utf8");
+    run();
+  } finally {
+    await writeFile(packageJsonPath, originalPackageJson, "utf8");
+  }
+}
 
 test("format:check rejects an unformatted package README", async () => {
   assert.notEqual(npmCli, undefined, "npm_execpath must be set by npm");
@@ -132,6 +183,85 @@ test("pack:check rejects optional production dependencies", async () => {
   } finally {
     await writeFile(packageJsonPath, originalPackageJson, "utf8");
   }
+});
+
+test("package manifest pins the exact supported Pi host and Node 24 runtime", async () => {
+  const manifest = await readPackageManifest();
+
+  assert.deepEqual(manifest.peerDependencies, { [piPackageName]: supportedPiVersion });
+  assert.deepEqual(manifest.dependencies, {});
+  assert.deepEqual(manifest.engines, { node: "^24.0.0" });
+
+  const devDependencies = assertManifestObject(
+    manifest.devDependencies,
+    "package.json must declare development dependencies",
+  );
+
+  assert.equal(devDependencies[piPackageName], supportedPiVersion);
+});
+
+test("pack:check rejects an unverified Pi host peer range", async () => {
+  assert.notEqual(npmCli, undefined, "npm_execpath must be set by npm");
+
+  if (npmCli === undefined) {
+    return;
+  }
+
+  await withPackageManifest(
+    (manifest) => {
+      manifest.peerDependencies = { [piPackageName]: "*" };
+    },
+    () => {
+      const result = runPackCheck(npmCli);
+
+      assert.notEqual(result.status, 0);
+      assert.match(result.output, /does not declare the exact supported Pi host peer/);
+    },
+  );
+});
+
+test("pack:check rejects a drifted Pi development host pin", async () => {
+  assert.notEqual(npmCli, undefined, "npm_execpath must be set by npm");
+
+  if (npmCli === undefined) {
+    return;
+  }
+
+  await withPackageManifest(
+    (manifest) => {
+      const devDependencies = assertManifestObject(
+        manifest.devDependencies,
+        "package.json must declare development dependencies",
+      );
+      devDependencies[piPackageName] = "^0.86.1";
+    },
+    () => {
+      const result = runPackCheck(npmCli);
+
+      assert.notEqual(result.status, 0);
+      assert.match(result.output, /does not pin the exact verified Pi development host/);
+    },
+  );
+});
+
+test("pack:check rejects a drifted Node runtime range", async () => {
+  assert.notEqual(npmCli, undefined, "npm_execpath must be set by npm");
+
+  if (npmCli === undefined) {
+    return;
+  }
+
+  await withPackageManifest(
+    (manifest) => {
+      manifest.engines = { node: "^26.0.0" };
+    },
+    () => {
+      const result = runPackCheck(npmCli);
+
+      assert.notEqual(result.status, 0);
+      assert.match(result.output, /Node 24 runtime contract/);
+    },
+  );
 });
 
 test("pack:check accepts the staged source package", () => {
