@@ -105,6 +105,53 @@ MEMORY_RECENCY_MIGRATION="$PWD/crates/memory-store/migrations/0002_memory_search
   bash integration/memory-postgres-smoke/scripts/verify-memory-head-recency.sh
 ```
 
+## Context Recency Index
+
+The context recency index migration
+(`0003_memory_context_recency_index.sql`) builds the ordered B-tree
+`(updated_at DESC, id COLLATE "C" ASC, version DESC)` used by the bounded
+startup-context read. It is standalone and must run outside every transaction
+wrapper, after `0002` has committed and memory writers have resumed:
+
+```sh
+psql --no-psqlrc --no-password --set=ON_ERROR_STOP=1 \
+  -f crates/memory-store/migrations/0003_memory_context_recency_index.sql
+```
+
+Do not add `--single-transaction` or wrap the file in `BEGIN`/`COMMIT`;
+PostgreSQL refuses `CREATE INDEX CONCURRENTLY` inside a transaction block. A
+cancelled or failed concurrent build leaves an invalid index. Recovery is
+explicit: drop only that invalid index concurrently, then rerun the same
+migration. The migration never replaces an existing index by itself.
+
+```sh
+psql --no-psqlrc --no-password --set=ON_ERROR_STOP=1 \
+  -c 'DROP INDEX CONCURRENTLY IF EXISTS public.memory_search_heads_context_recency_idx'
+```
+
+The verifier seeds resumed writers, rejects a transaction-wrapped build, leaves
+a simulated failed concurrent build invalid, repairs it through the documented
+drop-and-rerun recovery, and proves an application insert still commits while
+the build waits on an older snapshot. It also checks the exact index
+definition, ordering, validity, forced ordered plan, privileges, old-reader
+compatibility, and that `0002` remains transactional and non-null.
+
+```sh
+postgresql17="$(nix build --no-link --print-out-paths .#postgresql17-search)"
+MEMORY_SCHEMA_MIGRATION="$PWD/crates/memory-store/migrations/0001_memory_schema_search.sql" \
+MEMORY_RECENCY_MIGRATION="$PWD/crates/memory-store/migrations/0002_memory_search_head_recency.sql" \
+MEMORY_CONTEXT_INDEX_MIGRATION="$PWD/crates/memory-store/migrations/0003_memory_context_recency_index.sql" \
+  bash integration/memory-postgres-smoke/scripts/setup.sh "$postgresql17/bin" 17 -- \
+  bash integration/memory-postgres-smoke/scripts/verify-memory-context-recency-index.sh
+
+postgresql18="$(nix build --no-link --print-out-paths .#postgresql18-search)"
+MEMORY_SCHEMA_MIGRATION="$PWD/crates/memory-store/migrations/0001_memory_schema_search.sql" \
+MEMORY_RECENCY_MIGRATION="$PWD/crates/memory-store/migrations/0002_memory_search_head_recency.sql" \
+MEMORY_CONTEXT_INDEX_MIGRATION="$PWD/crates/memory-store/migrations/0003_memory_context_recency_index.sql" \
+  bash integration/memory-postgres-smoke/scripts/setup.sh "$postgresql18/bin" 18 -- \
+  bash integration/memory-postgres-smoke/scripts/verify-memory-context-recency-index.sh
+```
+
 ## Embedding Lifecycle
 
 Task 5.2 verifies committed parent-before-child ordering, historical and
