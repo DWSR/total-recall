@@ -1,7 +1,7 @@
 # Implementation Plan
 
 - [ ] 1. Establish the pinned host and Pi context foundation
-- [ ] 1.1 Pin the supported Pi host contract
+- [x] 1.1 Pin the supported Pi host contract
   - Constrain the host peer to Pi `0.86.1`, retain Node 24, update the lock, and preserve the package's empty production dependency set.
   - Add manifest checks that reject an unverified host range without changing the existing extension entrypoint.
   - Completion is observable when a clean install resolves the exact development host and package checks reject peer or Node drift.

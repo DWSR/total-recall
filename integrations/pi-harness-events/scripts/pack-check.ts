@@ -5,6 +5,8 @@ import { join, resolve } from "node:path";
 import process from "node:process";
 
 const packageName = "@dwsr/pi-harness-events";
+const piPackageName = "@earendil-works/pi-coding-agent";
+const supportedPiVersion = "0.86.1";
 const packagedFiles = [
   "LICENSE",
   "README.md",
@@ -121,12 +123,14 @@ function assertPackageManifest(value: unknown): string {
     throw new Error("installed package manifest has optional production dependencies");
   }
 
-  if (!hasExactStringRecord(value.peerDependencies, { "@earendil-works/pi-coding-agent": "*" })) {
-    throw new Error("installed package manifest does not declare the Pi peer dependency");
+  if (!hasExactStringRecord(value.peerDependencies, { [piPackageName]: supportedPiVersion })) {
+    throw new Error("installed package manifest does not declare the exact supported Pi host peer");
   }
 
-  if (!hasStringRecordEntry(value.devDependencies, "@earendil-works/pi-coding-agent", "1.0.0")) {
-    throw new Error("installed package manifest does not pin Pi for development verification");
+  if (!hasStringRecordEntry(value.devDependencies, piPackageName, supportedPiVersion)) {
+    throw new Error(
+      "installed package manifest does not pin the exact verified Pi development host",
+    );
   }
 
   if (!isRecord(value.pi) || !hasExactStringArray(value.pi.extensions, [expectedExtension])) {
