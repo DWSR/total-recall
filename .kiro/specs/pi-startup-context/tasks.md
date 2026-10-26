@@ -13,7 +13,7 @@
   - Completion is observable when exact valid records decode and every protected or malformed shape fails as one complete result with no partial data.
   - _Requirements: 1.7, 5.1, 5.2, 5.9, 6.9, 6.10_
   - _Boundary: Context Contracts_
-- [ ] 1.3 Add opt-in context configuration
+- [x] 1.3 Add opt-in context configuration
   - Resolve disabled, invalid, and enabled modes with the designed defaults, numeric ceilings, cross-deadline rules, absolute worker path, and required memory database.
   - Produce the exact child-environment allowlist and fixed bounded configuration diagnostic without changing capture configuration.
   - Completion is observable when pure tests cover every mode and bound and ambient provider, proxy, home, path, capture, and credential sentinels are absent from the child environment.
