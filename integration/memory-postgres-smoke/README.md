@@ -152,6 +152,21 @@ MEMORY_CONTEXT_INDEX_MIGRATION="$PWD/crates/memory-store/migrations/0003_memory_
   bash integration/memory-postgres-smoke/scripts/verify-memory-context-recency-index.sh
 ```
 
+### Verifier Sensitivity
+
+The negative fixtures under `integration/memory-postgres-smoke/fixtures/` prove
+that the verifier fails when the migration does not keep the required
+transactional rejection and explicit-recovery behavior. Point
+`MEMORY_CONTEXT_INDEX_MIGRATION` at a fixture instead of `0003` and run the same
+fixture command:
+
+- `context-recency-index-transactional.sql` must exit non-zero with
+  `expected transaction-wrapped concurrent index rejection`.
+- `context-recency-index-auto-replace.sql` must exit non-zero with
+  `expected invalid-index collision rejection`.
+
+The checked-in `0003` migration exits zero against both PostgreSQL majors.
+
 ## Embedding Lifecycle
 
 Task 5.2 verifies committed parent-before-child ordering, historical and
