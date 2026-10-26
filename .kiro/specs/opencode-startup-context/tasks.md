@@ -1,7 +1,7 @@
 # Implementation Plan
 
 - [ ] 1. Establish the indexed memory-context domain
-- [ ] 1.1 Add current-head recency state
+- [x] 1.1 Add current-head recency state
   - Add the forward transactional change that records the selected canonical memory's update time on each current head.
   - Replace the secured head-maintenance behavior, backfill exact selected versions, validate non-null state, and retain existing privileges and old-reader compatibility under finite migration limits.
   - Completion is observable when a seeded baseline applies atomically and any lock or statement timeout leaves the baseline unchanged.
