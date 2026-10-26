@@ -13,6 +13,7 @@ const packagedFiles = [
   "package.json",
   "src/adapter.ts",
   "src/config.ts",
+  "src/context-config.ts",
   "src/context-model.ts",
   "src/dispatcher.ts",
   "src/index.ts",
