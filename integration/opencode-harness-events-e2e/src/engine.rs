@@ -523,13 +523,14 @@ async fn wait_until_ready(
         .map_err(|error| map_registration_error(client, error))?;
     ensure_connected(client)?;
 
+    let mut saw_catalog_mismatch = false;
     loop {
         let remaining = deadline.saturating_duration_since(Instant::now());
         if remaining.is_zero() {
-            return Err(readiness_error(EngineReadinessError::Timeout));
+            return Err(readiness_deadline_error(saw_catalog_mismatch));
         }
 
-        let response = timeout_at(
+        let response = match timeout_at(
             deadline,
             client.trigger(TriggerRequest {
                 function_id: EngineFunctions::INFO_FUNCTIONS.to_owned(),
@@ -542,19 +543,27 @@ async fn wait_until_ready(
             }),
         )
         .await
-        .map_err(|_| readiness_error(EngineReadinessError::Timeout))?
-        .map_err(|error| map_catalog_error(client, error))?;
+        {
+            Ok(Ok(response)) => response,
+            Ok(Err(error)) => return Err(map_catalog_error(client, error)),
+            Err(_) => return Err(readiness_deadline_error(saw_catalog_mismatch)),
+        };
         match parse_catalog_response(response)? {
-            CatalogProbe::Pending => wait_for_catalog_poll(deadline).await?,
+            CatalogProbe::Pending => {
+                saw_catalog_mismatch = false;
+                wait_for_catalog_poll(deadline, saw_catalog_mismatch).await?;
+            }
             CatalogProbe::Entries(entries) if catalog_matches(identity, &entries) => {
                 ensure_connected(client)?;
                 return Ok(());
             }
             CatalogProbe::Entries(entries) if entries.len() < CAPTURE_FUNCTION_IDS.len() => {
-                wait_for_catalog_poll(deadline).await?;
+                saw_catalog_mismatch = false;
+                wait_for_catalog_poll(deadline, saw_catalog_mismatch).await?;
             }
             CatalogProbe::Entries(_) => {
-                return Err(readiness_error(EngineReadinessError::CatalogMismatch));
+                saw_catalog_mismatch = true;
+                wait_for_catalog_poll(deadline, saw_catalog_mismatch).await?;
             }
         }
     }
@@ -571,14 +580,25 @@ fn ensure_connected(client: &IIIClient) -> Result<(), EngineError> {
     Ok(())
 }
 
-async fn wait_for_catalog_poll(deadline: Instant) -> Result<(), EngineError> {
+async fn wait_for_catalog_poll(
+    deadline: Instant,
+    saw_catalog_mismatch: bool,
+) -> Result<(), EngineError> {
     let next_poll = std::cmp::min(deadline, Instant::now() + CATALOG_POLL_INTERVAL);
     sleep(next_poll.saturating_duration_since(Instant::now())).await;
     if Instant::now() >= deadline {
-        return Err(readiness_error(EngineReadinessError::Timeout));
+        return Err(readiness_deadline_error(saw_catalog_mismatch));
     }
 
     Ok(())
+}
+
+fn readiness_deadline_error(saw_catalog_mismatch: bool) -> EngineError {
+    readiness_error(if saw_catalog_mismatch {
+        EngineReadinessError::CatalogMismatch
+    } else {
+        EngineReadinessError::Timeout
+    })
 }
 
 fn map_registration_error(client: &IIIClient, error: iii_sdk::Error) -> EngineError {
@@ -758,6 +778,22 @@ mod tests {
                 "worker_name": "worker",
                 "namespace": "namespace",
             })
+        );
+    }
+
+    #[test]
+    fn readiness_deadline_preserves_catalog_mismatch_when_seen() {
+        assert_eq!(
+            super::readiness_deadline_error(true),
+            super::EngineError::Readiness {
+                kind: super::EngineReadinessError::CatalogMismatch,
+            }
+        );
+        assert_eq!(
+            super::readiness_deadline_error(false),
+            super::EngineError::Readiness {
+                kind: super::EngineReadinessError::Timeout,
+            }
         );
     }
 
