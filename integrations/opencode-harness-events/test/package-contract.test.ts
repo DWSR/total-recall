@@ -400,6 +400,16 @@ function observationArguments(
   ];
 }
 
+function compareStrings(left: string, right: string): number {
+  if (left < right) {
+    return -1;
+  }
+  if (left > right) {
+    return 1;
+  }
+  return 0;
+}
+
 function expectedArtifactFiles(): string[] {
   const builtFiles = BUILT_MODULES.flatMap((moduleName) => [
     `package/dist/${moduleName}.d.ts`,
@@ -412,7 +422,7 @@ function expectedArtifactFiles(): string[] {
     "package/README.md",
     "package/package.json",
     ...builtFiles,
-  ].sort();
+  ].sort(compareStrings);
 }
 
 test(
@@ -467,7 +477,7 @@ test(
         await Bun.file(tarballPath).arrayBuffer(),
       );
       const files = await archive.files();
-      const archiveFiles = [...files.keys()].sort();
+      const archiveFiles = [...files.keys()].sort(compareStrings);
       expect(archiveFiles).toEqual(expectedArtifactFiles());
       expect(
         archiveFiles.some((fileName) =>
