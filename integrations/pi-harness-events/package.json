@@ -46,7 +46,7 @@
     "@biomejs/biome": "2.6.5",
     "@earendil-works/pi-coding-agent": "1.4.0",
     "@types/node": "26.6.6",
-    "prettier": "3.9.10",
+    "prettier": "3.10.0",
     "typescript": "7.0.2"
   }
 }
